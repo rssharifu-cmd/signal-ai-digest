@@ -14,6 +14,7 @@ const { getDb } = require("./db");
 const {
   buildMemoryFromOnboarding,
   applyFeedback,
+  applyClick,
   ensureMemory,
 } = require("./memory");
 
@@ -88,6 +89,25 @@ async function handler(req, res) {
           topic: body.topic,
           sentiment,
           storyTitle: body.storyTitle,
+        });
+
+        await users.updateOne(
+          { email },
+          { $set: { memory: updatedMemory, updatedAt: now } }
+        );
+
+        return res.status(200).json({ ok: true, memory: updatedMemory });
+      }
+
+      // ── CLICK / ENGAGEMENT — update memory from click activity ─────────────────────
+      if (action === "click") {
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        const currentMemory = ensureMemory(user, user.profile);
+        const updatedMemory = applyClick(currentMemory, {
+          topic: body.topic,
+          storyTitle: body.storyTitle,
+          url: body.url,
         });
 
         await users.updateOne(

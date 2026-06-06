@@ -367,17 +367,36 @@ async function sendDigestEmail(user, digestContent) {
 }
 
 // ── SAVE DIGEST TO MONGODB ─────────────────────────────────────────────────────
-async function saveDigest(db, userId, email, content) {
+async function saveDigest(db, userId, email, content, localDateStr) {
   try {
     await db.collection("digests").insertOne({
       userId,
       email,
       content,
       sentAt: new Date(),
-      date: new Date().toISOString().split("T")[0],
+      date: localDateStr || new Date().toISOString().split("T")[0],
     });
   } catch (e) {
     console.warn("Digest save failed:", e.message);
+  }
+}
+
+// ── RECORD DELIVERY ATTEMPT LOG ──────────────────────────────────────────────────
+async function logDelivery(db, user, status, error = null, userLocalDateStr = "", userTimeStr = "") {
+  try {
+    await db.collection("delivery_logs").insertOne({
+      userId: user._id,
+      email: user.email,
+      status, // 'success', 'failed', 'skipped'
+      error,
+      attemptedAt: new Date(),
+      userLocalTime: userTimeStr,
+      userLocalDate: userLocalDateStr,
+      timezone: user.profile?.timezone || "UTC",
+      digestTime: user.profile?.digestTime || "08:00"
+    });
+  } catch (e) {
+    console.warn("Delivery log insert failed:", e.message);
   }
 }
 
@@ -398,6 +417,7 @@ async function handler(req, res) {
 
   const startTime = Date.now();
   const results = { sent: 0, failed: 0, skipped: 0, errors: [] };
+  const now = new Date();
 
   try {
     const db    = await getDb();
@@ -406,9 +426,14 @@ async function handler(req, res) {
       profile: { $exists: true, $ne: null },
     }).toArray();
 
-    console.log(`[CRON] Starting digest run for ${users.length} users`);
+    console.log(`[CRON] Starting hourly timezone matching run for ${users.length} registered users`);
 
     for (const user of users) {
+      let userTimeStr = "";
+      let userLocalDateStr = "";
+      let userHour = 8;
+      let userTz = user.profile?.timezone || "UTC";
+
       try {
         if (!user.email || !user.profile?.summary) {
           results.skipped++;
@@ -416,34 +441,122 @@ async function handler(req, res) {
         }
 
         const profile = user.profile;
+        const digestTimePreference = profile.digestTime || "08:00"; 
+
+        try {
+          userTimeStr = now.toLocaleTimeString("en-US", {
+            timeZone: userTz,
+            hour12: false,
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+          userLocalDateStr = now.toLocaleDateString("en-US", {
+            timeZone: userTz,
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+          });
+          const localHourStr = now.toLocaleTimeString("en-US", {
+            timeZone: userTz,
+            hour12: false,
+            hour: "2-digit",
+          });
+          userHour = parseInt(localHourStr, 10);
+        } catch (tzErr) {
+          console.warn(`Invalid timezone [${userTz}] for user ${user.email}, falling back to UTC`, tzErr.message);
+          userTz = "UTC";
+          userTimeStr = now.toLocaleTimeString("en-US", {
+            timeZone: "UTC",
+            hour12: false,
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+          userLocalDateStr = now.toLocaleDateString("en-US", {
+            timeZone: "UTC",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+          });
+          userHour = now.getUTCHours();
+        }
+
+        const targetHour = parseInt(digestTimePreference.split(":")[0], 10);
+
+        // 1. Check if the current user-local hour is the targeted delivery hour
+        if (userHour !== targetHour) {
+          results.skipped++;
+          continue;
+        }
+
+        // 2. Prevent duplicate sends within the same user-local day
+        if (user.lastDigestSentDate === userLocalDateStr) {
+          console.log(`[CRON] ${user.email} already received their digest for ${userLocalDateStr} today. Skipping to prevent duplicate.`);
+          results.skipped++;
+          continue;
+        }
+
+        // 3. Double check the digests collection to ensure no race conditions
+        const existingDigest = await db.collection("digests").findOne({
+          email: user.email,
+          date: userLocalDateStr
+        });
+        if (existingDigest) {
+          console.log(`[CRON] ${user.email} secondary duplicate prevent check matched in digests collection for ${userLocalDateStr}`);
+          await db.collection("users").updateOne(
+            { _id: user._id },
+            { $set: { lastDigestSentDate: userLocalDateStr } }
+          );
+          results.skipped++;
+          continue;
+        }
+
+        // 4. Matches scheduled parameters - proceed with fetch and dispatch
         const topics  = profile.topics     || "technology, AI";
         const prof    = profile.profession || "";
         const avoid   = profile.avoid      || "";
 
-        // 1. Fetch news
+        // Fetch news matching preferences
         const news = await fetchNews(topics, prof, avoid);
-        console.log(`[CRON] ${user.email} — fetched ${news.articles.length} articles`);
+        console.log(`[CRON] ${user.email} — fetched ${news.articles.length} news articles`);
 
-        // 2. Generate personalized digest via Groq
+        // Generate personalized digest via AI
         const digestContent = await generateDigest(user, news);
-        if (!digestContent) { results.skipped++; continue; }
+        if (!digestContent) { 
+          results.skipped++; 
+          await logDelivery(db, user, "skipped", "Empty digest content generated", userLocalDateStr, userTimeStr);
+          continue; 
+        }
 
-        // 3. Send email via Resend
+        // Send beautiful HTML email via Resend
         const emailId = await sendDigestEmail(user, digestContent);
-        console.log(`[CRON] ${user.email} — email sent: ${emailId}`);
+        console.log(`[CRON] ${user.email} — email sent successfully: ${emailId}`);
 
-        // 4. Save to MongoDB
-        await saveDigest(db, user._id, user.email, digestContent);
+        // Save complete historical record inside the digests collection
+        await saveDigest(db, user._id, user.email, digestContent, userLocalDateStr);
+
+        // Stamp send state directly to the user record
+        await db.collection("users").updateOne(
+          { _id: user._id },
+          { $set: { lastDigestSentDate: userLocalDateStr, lastDigestSentAt: new Date() } }
+        );
+
+        // Log successful delivery attempt
+        await logDelivery(db, user, "success", null, userLocalDateStr, userTimeStr);
 
         results.sent++;
 
-        // Rate limit: wait 500ms between users to avoid API throttling
+        // Rate limit padding between active dispatches
         await sleep(500);
 
       } catch (userErr) {
         console.error(`[CRON] Failed for ${user.email}:`, userErr.message);
         results.failed++;
         results.errors.push({ email: user.email, error: userErr.message });
+        try {
+          await logDelivery(db, user, "failed", userErr.message, userLocalDateStr, userTimeStr);
+        } catch (logErr) {
+          console.error(`Status log write failed for ${user.email}:`, logErr.message);
+        }
       }
     }
 

@@ -30,7 +30,12 @@ function escapeHtml(s) {
 }
 
 function formatBotHtml(t) {
-  return escapeHtml(t).replace(/\n/g, "<br/>");
+  const escaped = escapeHtml(t);
+  const urlRegex = /(https?:\/\/[^\s<>\(\)\[\]"']+)/g;
+  const formatted = escaped.replace(urlRegex, (url) => {
+    return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="digest-link">${url}</a>`;
+  });
+  return formatted.replace(/\n/g, "<br/>");
 }
 
 function toast(msg) {
@@ -777,9 +782,35 @@ function renderDigestHtml(content) {
 
 function wireDigestFeedback(container) {
   if (!container) return;
+
+  // 1. Wire 👍/👎 feedback buttons
   container.querySelectorAll(".fb-btn").forEach((btn) => {
-    btn.onclick = () =>
+    btn.onclick = (e) => {
+      e.stopPropagation(); // prevent card-level engagement click from firing
       submitFeedback(btn.dataset.topic, btn.dataset.sentiment, btn.dataset.title, btn);
+    };
+  });
+
+  // 2. Wire clicked links inside stories (to learn from active clicked links)
+  container.querySelectorAll(".digest-link").forEach((link) => {
+    link.onclick = (e) => {
+      e.stopPropagation(); // prevent duplicate card-level click from firing
+      const card = link.closest(".digest-story");
+      const topic = card ? (card.dataset.topic || "") : "";
+      const titleEl = card ? card.querySelector(".digest-story-title") : null;
+      const title = titleEl ? titleEl.textContent : "";
+      trackEngagementClick(topic, title, link.href);
+    };
+  });
+
+  // 3. Wire opened/viewed story card clicks (to learn from clicked/opened articles)
+  container.querySelectorAll(".digest-story").forEach((card) => {
+    card.onclick = () => {
+      const topic = card.dataset.topic || "";
+      const titleEl = card.querySelector(".digest-story-title");
+      const title = titleEl ? titleEl.textContent : "";
+      trackEngagementClick(topic, title, "");
+    };
   });
 }
 
@@ -1065,6 +1096,34 @@ async function saveDashboardSettings() {
   }
 }
 
+async function trackEngagementClick(topic, storyTitle, url) {
+  try {
+    const token = localStorage.getItem(STORAGE.token) || "";
+    const res = await fetch("/api/user", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        action: "click",
+        topic,
+        storyTitle,
+        url
+      })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.memory) {
+        userMemory = data.memory;
+        console.log("[Analytics] Long-term memory engagement registered:", data.memory);
+      }
+    }
+  } catch (err) {
+    console.warn("[Analytics] Engagement track ignored:", err.message);
+  }
+}
+
 // Expose for inline handlers
 window.openAuthModal = openAuthModal;
 window.closeAuthModal = closeAuthModal;
@@ -1082,4 +1141,4 @@ window.resetAll = resetAll;
 window.submitFeedback = submitFeedback;
 window.loadSettingsIntoDashboard = loadSettingsIntoDashboard;
 window.saveDashboardSettings = saveDashboardSettings;
-window.submitFeedback = submitFeedback;
+window.trackEngagementClick = trackEngagementClick;

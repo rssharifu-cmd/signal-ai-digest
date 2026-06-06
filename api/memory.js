@@ -61,7 +61,35 @@ function pruneClickedTopics(clickedTopics) {
   });
 }
 
-/** Apply 👍/👎 feedback — adjusts interest scores and disliked list. */
+/** Extract useful, non-stopword keyword concepts for semantic profiling. */
+function extractKeywords(text) {
+  if (!text) return [];
+  const cleaned = text
+    .replace(/^[①②③④⑤]\s*/, "")
+    .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?"']/g, " ")
+    .toLowerCase();
+  
+  const stopwords = new Set([
+     "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are", "as", "at",
+     "be", "because", "been", "before", "being", "below", "between", "both", "but", "by", "can", "could",
+     "did", "do", "does", "doing", "down", "during", "each", "few", "for", "from",
+     "further", "had", "has", "have", "having", "he", "her", "here", "hers", "herself", "him", "himself",
+     "his", "how", "i", "if", "in", "into", "is", "it", "its", "itself", "me", "more", "most", "my",
+     "myself", "no", "nor", "not", "of", "off", "on", "once", "only", "or", "other", "our", "ours",
+     "ourselves", "out", "over", "own", "same", "she", "should", "so", "some", "such", "than", "that",
+     "the", "their", "theirs", "them", "themselves", "then", "there", "these", "they", "this", "those",
+     "through", "to", "too", "under", "until", "up", "very", "was", "we", "were", "what", "when", "where",
+     "which", "while", "who", "whom", "why", "with", "would", "you", "your", "yours", "yourself", "yourselves",
+     "what's", "you'll", "you'd", "we'll", "it's"
+  ]);
+
+  return cleaned
+    .split(/\s+/)
+    .map((w) => w.trim())
+    .filter((w) => w.length >= 3 && !stopwords.has(w));
+}
+
+/** Apply 👍/👎 feedback — adjusts interest scores and disliked list, with long-term semantic keyword updates. */
 function applyFeedback(memory, { topic, sentiment, storyTitle }) {
   const m = { ...memory };
   m.interests = { ...(m.interests || {}) };
@@ -74,18 +102,63 @@ function applyFeedback(memory, { topic, sentiment, storyTitle }) {
   const now = new Date();
   m.clickedTopics.push({ topic: key, at: now });
 
+  const keywords = extractKeywords(key);
+
   if (sentiment === "like") {
     const prev = m.interests[key] ?? DEFAULT_INTEREST_SCORE;
-    m.interests[key] = Math.min(100, prev + 10);
+    m.interests[key] = Math.min(100, prev + 15);
+    
+    // Boost keyword concepts in long-term profile
+    for (const kw of keywords) {
+      const pKw = m.interests[kw] ?? DEFAULT_INTEREST_SCORE;
+      m.interests[kw] = Math.min(100, pKw + 8);
+    }
+
     m.dislikedTopics = m.dislikedTopics.filter(
-      (d) => d.toLowerCase() !== key.toLowerCase()
+      (d) => d.toLowerCase() !== key.toLowerCase() && !keywords.includes(d.toLowerCase())
     );
   } else if (sentiment === "dislike") {
     const prev = m.interests[key] ?? DEFAULT_INTEREST_SCORE;
-    m.interests[key] = Math.max(0, prev - 15);
+    m.interests[key] = Math.max(0, prev - 25);
+
+    // Down-rank keyword concepts in long-term profile
+    for (const kw of keywords) {
+      const pKw = m.interests[kw] ?? DEFAULT_INTEREST_SCORE;
+      m.interests[kw] = Math.max(0, pKw - 12);
+    }
+
     if (!m.dislikedTopics.some((d) => d.toLowerCase() === key.toLowerCase())) {
       m.dislikedTopics.push(key);
     }
+  }
+
+  m.clickedTopics = pruneClickedTopics(m.clickedTopics);
+  m.updatedAt = now;
+  return m;
+}
+
+/** Apply opened article / clicked link event - records click in recent engagements and reinforces long-term profile interest. */
+function applyClick(memory, { topic, storyTitle, url }) {
+  const m = { ...memory };
+  m.interests = { ...(m.interests || {}) };
+  m.clickedTopics = pruneClickedTopics(m.clickedTopics || []);
+
+  const key = (topic || storyTitle || "").trim();
+  if (!key) return m;
+
+  const now = new Date();
+  // Record short-term engagement activity (declaws after 7 days)
+  m.clickedTopics.push({ topic: key, url, at: now });
+
+  // Reinforce permanent interest score
+  const prev = m.interests[key] ?? DEFAULT_INTEREST_SCORE;
+  m.interests[key] = Math.min(100, prev + 5);
+
+  // Reinforce semantic keywords in long-term memory for broader interest learning
+  const keywords = extractKeywords(key);
+  for (const kw of keywords) {
+    const pKw = m.interests[kw] ?? DEFAULT_INTEREST_SCORE;
+    m.interests[kw] = Math.min(100, pKw + 3);
   }
 
   m.clickedTopics = pruneClickedTopics(m.clickedTopics);
@@ -212,6 +285,7 @@ STRICT RULES:
 module.exports = {
   buildMemoryFromOnboarding,
   applyFeedback,
+  applyClick,
   formatMemoryForPrompt,
   ensureMemory,
   pruneClickedTopics,
