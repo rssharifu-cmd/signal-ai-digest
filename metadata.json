@@ -1,0 +1,6 @@
+{
+  "name": "Signal",
+  "description": "Signal — World's most personalized AI news digest, filtering noise into insights, powered by Gemini.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

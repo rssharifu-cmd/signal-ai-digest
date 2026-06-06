@@ -1,0 +1,366 @@
+/**
+ * Vercel Node.js Serverless — POST /api/chat
+ * GET /api/chat — quick health JSON
+ *
+ * Modified to support Gemini automatically as the primary intelligence model.
+ */
+
+const { formatMemoryForPrompt, buildDigestPrompt } = require("./memory");
+const { GoogleGenAI } = require("@google/genai");
+
+const GROK_URL = "https://api.groq.com/openai/v1/chat/completions";
+const MODEL = "llama-3.3-70b-versatile";
+const GROK_TIMEOUT_MS = 45000;
+
+// Initialize Gemini if key exists
+let aiClient = null;
+if (process.env.GEMINI_API_KEY) {
+  try {
+    aiClient = new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        }
+      }
+    });
+  } catch (err) {
+    console.error("Failed to initialize GoogleGenAI client:", err);
+  }
+}
+
+const ONBOARDING_SYSTEM = `You are Signal — a warm, concise assistant helping a user set up their personalized daily news digest.
+
+The user has already filled in a quick profile form (name, profession, topics, sources). You will receive that as context.
+
+Your job: have a short, natural follow-up conversation (3–5 messages max) to clarify or enrich the profile. Then confirm and wrap up.
+
+Rules:
+- Ask ONE question at a time, maximum.
+- Never ask for their email — they already gave it when signing up.
+- Never give instructions, tasks, or advice like a mentor ("you should try X", "consider doing Y"). You are a listener, not a coach.
+- Do not repeat questions about things already covered in the profile form.
+- Be curious about their *specific* context — depth, nuance, what they find noisy, what excites them.
+- Keep replies SHORT (2–4 sentences max). No bullet lists unless wrapping up.
+- When you feel you have enough to build a good digest profile (after 3–5 user messages), say warmly that you have everything and you're ready to draft their profile summary. Do not output the summary yet — the app will trigger that separately.
+- Never ask them to paste API keys or credentials.`;
+
+function cors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+async function grokFetch(apiKey, payload) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), GROK_TIMEOUT_MS);
+  try {
+    return await fetch(GROK_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(payload),
+      signal: ctrl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function parseBody(req) {
+  if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) {
+    return req.body;
+  }
+  const raw = typeof req.body === "string" ? req.body : "";
+  try {
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+async function handler(req, res) {
+  cors(res);
+
+  if (req.method === "OPTIONS") return res.status(204).end();
+
+  if (req.method === "GET") {
+    return res.status(200).json({
+      ok: true,
+      route: "/api/chat",
+      runtime: "nodejs",
+    });
+  }
+
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  try {
+    const body = parseBody(req);
+    const apiGrokKey = (process.env.GROK_API_KEY || "").trim();
+
+    const action = body.action || "chat";
+
+    // ── CHAT ─────────────────────────────────────────────────────────────────
+    if (action === "chat") {
+      const messages = body.messages;
+      if (!Array.isArray(messages) || messages.length === 0) {
+        return res.status(400).json({ error: "messages array required" });
+      }
+
+      // Profile form data passed from frontend
+      const profileForm = body.profileForm || {};
+      const profileContext = Object.keys(profileForm).length
+        ? `\n\nPROFILE FORM ALREADY SUBMITTED:\n${Object.entries(profileForm)
+            .map(([k, v]) => `- ${k}: ${v}`)
+            .filter(([, v]) => v)
+            .join("\n")}`
+        : "";
+
+      let system = ONBOARDING_SYSTEM + profileContext;
+      let conv = messages;
+
+      if (messages[0]?.role === "assistant") {
+        system +=
+          "\n\nYou already opened the chat with this message (stay consistent):\n---\n" +
+          messages[0].content +
+          "\n---";
+        conv = messages.slice(1);
+      }
+      if (conv.length === 0) return res.status(400).json({ error: "No user messages yet" });
+
+      const userTurns = messages.filter((m) => m.role === "user").length;
+
+      // After 4+ turns, hint AI to wrap up if it hasn't
+      if (userTurns >= 4) {
+        system +=
+          "\n\nYou have collected enough information. In your next reply (if not already done), warmly tell the user you have everything needed and are ready to generate their profile summary. Keep it to 1–2 sentences.";
+      }
+
+      let content = "";
+
+      if (aiClient) {
+        const contents = conv.map(m => ({
+          role: m.role === "assistant" ? "model" : m.role,
+          parts: [{ text: m.content || "" }]
+        }));
+
+        const response = await aiClient.models.generateContent({
+          model: "gemini-3.5-flash",
+          contents: contents,
+          config: {
+            systemInstruction: system,
+            temperature: 0.7,
+          }
+        });
+        content = response.text || "";
+      } else {
+        if (!apiGrokKey) {
+          return res.status(400).json({
+            error: "Missing API key. Provide GEMINI_API_KEY or GROK_API_KEY.",
+          });
+        }
+        const grokRes = await grokFetch(apiGrokKey, {
+          model: MODEL,
+          max_tokens: 600,
+          messages: [{ role: "system", content: system }, ...conv],
+        });
+
+        if (!grokRes.ok) {
+          const err = await grokRes.json().catch(() => ({}));
+          return res.status(grokRes.status).json({ error: err.error?.message || "Groq API error" });
+        }
+
+        const data = await grokRes.json();
+        content = data.choices?.[0]?.message?.content ?? "";
+      }
+
+      // Detect if AI is signalling wrap-up
+      const wrapKeywords = ["ready to draft", "ready to generate", "have everything", "build your profile", "draft your profile"];
+      const readyForSummary = userTurns >= 3 && wrapKeywords.some(k => content.toLowerCase().includes(k));
+
+      return res.status(200).json({
+        content,
+        userTurns,
+        readyForSummary,
+      });
+    }
+
+    // ── SUMMARY ──────────────────────────────────────────────────────────────
+    if (action === "summary") {
+      const messages = body.messages;
+      if (!Array.isArray(messages) || messages.length === 0) {
+        return res.status(400).json({ error: "messages required for summary" });
+      }
+
+      const profileForm = body.profileForm || {};
+      const profileFormText = Object.keys(profileForm).length
+        ? `PROFILE FORM:\n${Object.entries(profileForm)
+            .map(([k, v]) => `- ${k}: ${v}`)
+            .filter(([, v]) => v)
+            .join("\n")}\n\n`
+        : "";
+
+      const transcript = messages
+        .map((m) => `${m.role === "user" ? "User" : "Signal"}: ${m.content}`)
+        .join("\n\n");
+
+      const adj =
+        typeof body.adjustment === "string" && body.adjustment.trim()
+          ? `\n\nThe user requests this revision: ${body.adjustment.trim()}`
+          : "";
+
+      const userPrompt = `${profileFormText}FOLLOW-UP CHAT:\n${transcript}${adj}\n\n---
+Write a concise profile summary the user will approve before their first digest. Use clear sections:
+
+1) Who they are (name if given, role, context)
+2) Topics & sources to emphasize
+3) What to avoid / filter out
+4) Custom sources (websites, YouTube channels, X accounts) if mentioned
+5) Tone & format preference for daily email
+6) What their digest will typically include (4–5 short bullets)
+
+End with exactly this line on its own:
+"Does this look right? Adjust in chat, or tap Confirm to lock your profile."`;
+
+      let content = "";
+
+      if (aiClient) {
+        const response = await aiClient.models.generateContent({
+          model: "gemini-3.5-flash",
+          contents: userPrompt,
+          config: {
+            systemInstruction: "You write tight, accurate user profiles for a personalized digest product. Use only facts from the form and chat. Be specific, not generic.",
+            temperature: 0.3,
+          }
+        });
+        content = response.text || "";
+      } else {
+        if (!apiGrokKey) {
+          return res.status(400).json({
+            error: "Missing API key. Provide GEMINI_API_KEY or GROK_API_KEY.",
+          });
+        }
+        const grokRes = await grokFetch(apiGrokKey, {
+          model: MODEL,
+          max_tokens: 1000,
+          messages: [
+            {
+              role: "system",
+              content:
+                "You write tight, accurate user profiles for a personalized digest product. Use only facts from the form and chat. Be specific, not generic.",
+            },
+            { role: "user", content: userPrompt },
+          ],
+        });
+
+        if (!grokRes.ok) {
+          const err = await grokRes.json().catch(() => ({}));
+          return res.status(grokRes.status).json({ error: err.error?.message || "Groq API error" });
+        }
+
+        const data = await grokRes.json();
+        content = data.choices?.[0]?.message?.content ?? "";
+      }
+
+      return res.status(200).json({ content });
+    }
+
+    // ── DIGEST ───────────────────────────────────────────────────────────────
+    if (action === "digest") {
+      const profile = body.profile || {};
+      const memory = body.memory || null;
+      const narrative =
+        profile.narrative ||
+        profile.summary ||
+        [
+          profile.profession && `Role: ${profile.profession}`,
+          profile.goals && `Goals: ${profile.goals}`,
+          profile.topics && `Topics: ${profile.topics}`,
+          profile.avoid && `Avoid: ${profile.avoid}`,
+          profile.language && `Language: ${profile.language}`,
+          profile.country && `Country: ${profile.country}`,
+          profile.newsScope && `News scope: ${profile.newsScope}`,
+          profile.digestLength && `Digest length: ${profile.digestLength}`,
+        ]
+          .filter(Boolean)
+          .join("\n");
+
+      if (!narrative && !memory) {
+        return res.status(400).json({ error: "profile or memory required" });
+      }
+
+      const today = new Date().toLocaleDateString("en-US", {
+        weekday: "long", month: "long", day: "numeric", year: "numeric",
+      });
+
+      const newsContext =
+        typeof body.newsContext === "string" && body.newsContext.trim()
+          ? body.newsContext.trim()
+          : "";
+
+      const memoryText = formatMemoryForPrompt(memory);
+      const tone = profile.tone ? `Preferred tone: ${profile.tone}` : "";
+      const prompt = buildDigestPrompt({
+        memoryText: [memoryText, tone].filter(Boolean).join("\n"),
+        profileText: narrative,
+        newsContext,
+        plan: body.plan,
+        today,
+      });
+
+      let content = "";
+
+      if (aiClient) {
+        const response = await aiClient.models.generateContent({
+          model: "gemini-3.5-flash",
+          contents: prompt,
+          config: {
+            systemInstruction: "You are Signal — a personal intelligence system. You filter global noise into insights for one specific person. You never hallucinate. You explain WHY each item matters to them. You give actionable implications, not summaries.",
+            temperature: 0.3,
+          }
+        });
+        content = response.text || "";
+      } else {
+        if (!apiGrokKey) {
+          return res.status(400).json({
+            error: "Missing API key. Provide GEMINI_API_KEY or GROK_API_KEY.",
+          });
+        }
+        const isPro = body.plan === "pro";
+        const grokRes = await grokFetch(apiGrokKey, {
+          model: MODEL,
+          max_tokens: isPro ? 1800 : 1400,
+          temperature: 0.3,
+          messages: [
+            {
+              role: "system",
+              content:
+                "You are Signal — a personal intelligence system. You filter global noise into insights for one specific person. You never hallucinate. You explain WHY each item matters to them. You give actionable implications, not summaries.",
+            },
+            { role: "user", content: prompt },
+          ],
+        });
+
+        if (!grokRes.ok) {
+          const err = await grokRes.json().catch(() => ({}));
+          return res.status(grokRes.status).json({ error: err.error?.message || "Groq API error" });
+        }
+
+        const data = await grokRes.json();
+        content = data.choices?.[0]?.message?.content ?? "";
+      }
+
+      return res.status(200).json({ content });
+    }
+
+    return res.status(400).json({ error: "Unknown action" });
+  } catch (err) {
+    const msg =
+      err?.name === "AbortError" ? "Request timed out — try again." : err.message || "Server error";
+    return res.status(err?.name === "AbortError" ? 504 : 500).json({ error: msg });
+  }
+}
+
+module.exports = handler;

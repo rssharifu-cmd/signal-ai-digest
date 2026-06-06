@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Signal — personalized AI news digest delivered daily." />
+  <title>Signal — Your AI reads the internet for you</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/app.css" />
+</head>
+<body>
+
+<!-- Landing -->
+<div id="landing-view">
+  <nav class="nav">
+    <div class="nav-logo">Signal<em>.</em></div>
+    <div class="nav-actions">
+      <button class="btn btn-ghost" onclick="openAuthModal('login')">Sign in</button>
+      <button class="btn btn-primary" onclick="openAuthModal('signup')">Get started</button>
+    </div>
+  </nav>
+
+  <section class="hero">
+    <div class="hero-eyebrow">Personal intelligence, not generic news</div>
+    <h1>Your morning brief,<br/><span>built only for you.</span></h1>
+    <p class="hero-lead">Signal learns your role, topics, and noise filters — then curates real stories from live sources into one focused digest.</p>
+    <div class="hero-actions">
+      <button class="btn btn-primary btn-lg" onclick="openAuthModal('signup')">Start free trial</button>
+      <button class="btn btn-secondary btn-lg" onclick="document.getElementById('features').scrollIntoView({behavior:'smooth'})">How it works</button>
+    </div>
+
+    <div class="preview-card">
+      <div class="preview-bar">Your Signal · Today, 8:00 AM</div>
+      <div class="preview-body">
+        <div class="preview-item">
+          <strong>OpenAI ships reasoning model — impact on your PM workflow</strong>
+          <span>Matched to AI &amp; product · via TechCrunch</span>
+        </div>
+        <div class="preview-item">
+          <strong>Lenny Rachitsky: How agents replace SaaS (38 min)</strong>
+          <span>Skip to 12:30 · matched to your startup focus</span>
+        </div>
+        <div class="preview-item">
+          <strong>One action: Audit one repetitive task for agent automation</strong>
+          <span>Tailored to your stated goal this week</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section alt" id="features">
+    <div class="section-inner">
+      <p class="section-label">Why Signal</p>
+      <h2 class="section-title">Signal, not noise</h2>
+      <div class="features-grid">
+        <div class="feature-card">
+          <h3>Guided onboarding</h3>
+          <p>Five-step profile setup in under 90 seconds — role, topics, and news preferences tuned to you.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Live source pipeline</h3>
+          <p>Tavily search, RSS, Reddit, and YouTube feed real articles into your digest — not hallucinated headlines.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Professional dashboard</h3>
+          <p>Generate today's edition on demand, review your locked profile, and email yourself the brief.</p>
+        </div>
+        <div class="feature-card">
+          <h3>7-day profile lock</h3>
+          <p>Your preferences stay stable while Signal tunes relevance — then you can refine again.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p>© 2026 Signal · Personalized digest platform</p>
+  </footer>
+</div>
+
+<!-- Auth modal -->
+<div class="modal-overlay" id="auth-modal">
+  <div class="modal-card">
+    <div class="auth-tabs">
+      <button class="auth-tab active" id="tab-signup" onclick="switchAuthTab('signup')">Create account</button>
+      <button class="auth-tab" id="tab-login" onclick="switchAuthTab('login')">Sign in</button>
+    </div>
+    <div id="auth-signup-form">
+      <h2 style="font-family:var(--serif);font-size:1.5rem;margin-bottom:6px;">Start your trial</h2>
+      <p style="font-size:14px;color:var(--muted);margin-bottom:20px;">3 days free · no card required</p>
+      <div class="form-group"><label>Full name</label><input type="text" id="auth-name" placeholder="Your name" /></div>
+      <div class="form-group"><label>Email</label><input type="email" id="auth-email" placeholder="you@company.com" /></div>
+      <div class="form-group"><label>Password</label><input type="password" id="auth-pass" placeholder="Min 6 characters" /></div>
+      <button class="btn btn-primary btn-block" onclick="handleSignup()">Create Account →</button>
+    </div>
+    <div id="auth-login-form" class="hidden">
+      <h2 style="font-family:var(--serif);font-size:1.5rem;margin-bottom:6px;">Welcome back</h2>
+      <p style="font-size:14px;color:var(--muted);margin-bottom:20px;">Sign in to your dashboard</p>
+      <div class="form-group"><label>Email</label><input type="email" id="login-email" placeholder="you@company.com" /></div>
+      <div class="form-group"><label>Password</label><input type="password" id="login-pass" placeholder="Password" /></div>
+      <button class="btn btn-primary btn-block" onclick="handleLogin()">Sign In →</button>
+    </div>
+    <p style="text-align:center;margin-top:16px;"><a href="#" onclick="closeAuthModal();return false;" style="font-size:13px;color:var(--dim);">← Back</a></p>
+  </div>
+</div>
+
+<!-- App shell -->
+<div id="app-shell">
+  <header class="app-topbar">
+    <div>
+      <span class="app-topbar-title">Signal.</span>
+      <span class="app-badge" id="phase-label">Setup</span>
+    </div>
+    <button class="btn btn-ghost btn-sm" onclick="resetAll()">Reset</button>
+  </header>
+
+  <!-- Onboarding wizard -->
+  <div id="onboarding-view" class="onboard-wrap hidden">
+    <div class="onboard-container">
+      <div class="onboard-progress-top">
+        <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+        <span class="progress-label" id="progress-label">Step 1 of 5</span>
+      </div>
+
+      <div class="onboard-panel">
+        <!-- Step 1: Who are you? -->
+        <div class="onboard-step active" data-step="1">
+          <h2>Who are you?</h2>
+          <p class="step-lead">Tell us your role and what you're working toward.</p>
+          <div class="form-group">
+            <label>Role</label>
+            <div class="option-chips" id="role-chips">
+              <span class="option-chip" data-group="role" onclick="selectSingleChip(this)">Founder</span>
+              <span class="option-chip" data-group="role" onclick="selectSingleChip(this)">YouTuber</span>
+              <span class="option-chip" data-group="role" onclick="selectSingleChip(this)">Creator</span>
+              <span class="option-chip" data-group="role" onclick="selectSingleChip(this)">Developer</span>
+              <span class="option-chip" data-group="role" onclick="selectSingleChip(this)">Student</span>
+              <span class="option-chip" data-group="role" onclick="selectSingleChip(this)">Marketer</span>
+              <span class="option-chip" data-group="role" onclick="selectSingleChip(this)">Investor</span>
+              <span class="option-chip" data-group="role" onclick="selectSingleChip(this)">Business Owner</span>
+              <span class="option-chip" data-group="role" onclick="selectSingleChip(this)">Freelancer</span>
+              <span class="option-chip" data-group="role" data-other="role" onclick="selectSingleChip(this)">Other</span>
+            </div>
+            <input type="text" id="pf-role-other" class="other-input hidden" placeholder="Your role" />
+          </div>
+          <div class="form-group">
+            <label>Primary goal</label>
+            <div class="option-chips" id="goal-chips">
+              <span class="option-chip" data-group="goal" onclick="selectSingleChip(this)">Grow a business</span>
+              <span class="option-chip" data-group="goal" onclick="selectSingleChip(this)">Grow a YouTube channel</span>
+              <span class="option-chip" data-group="goal" onclick="selectSingleChip(this)">Learn AI</span>
+              <span class="option-chip" data-group="goal" onclick="selectSingleChip(this)">Career growth</span>
+              <span class="option-chip" data-group="goal" onclick="selectSingleChip(this)">Stay informed</span>
+              <span class="option-chip" data-group="goal" onclick="selectSingleChip(this)">Find opportunities</span>
+              <span class="option-chip" data-group="goal" onclick="selectSingleChip(this)">Industry research</span>
+              <span class="option-chip" data-group="goal" data-other="goal" onclick="selectSingleChip(this)">Other</span>
+            </div>
+            <input type="text" id="pf-goal-other" class="other-input hidden" placeholder="Your primary goal" />
+          </div>
+        </div>
+
+        <!-- Step 2: Topics -->
+        <div class="onboard-step" data-step="2">
+          <h2>What do you care about?</h2>
+          <p class="step-lead">Select all topics relevant to you.</p>
+          <div class="option-chips" id="topic-chips">
+            <span class="option-chip multi" onclick="toggleChip(this)">AI</span>
+            <span class="option-chip multi" onclick="toggleChip(this)">Business</span>
+            <span class="option-chip multi" onclick="toggleChip(this)">Startups</span>
+            <span class="option-chip multi" onclick="toggleChip(this)">Marketing</span>
+            <span class="option-chip multi" onclick="toggleChip(this)">Technology</span>
+            <span class="option-chip multi" onclick="toggleChip(this)">Finance</span>
+            <span class="option-chip multi" onclick="toggleChip(this)">Investing</span>
+            <span class="option-chip multi" onclick="toggleChip(this)">Manufacturing</span>
+            <span class="option-chip multi" onclick="toggleChip(this)">E-commerce</span>
+            <span class="option-chip multi" onclick="toggleChip(this)">Education</span>
+            <span class="option-chip multi" onclick="toggleChip(this)">Health</span>
+            <span class="option-chip multi" onclick="toggleChip(this)">Science</span>
+            <span class="option-chip multi" onclick="toggleChip(this)">Politics</span>
+            <span class="option-chip multi" onclick="toggleChip(this)">Sports</span>
+          </div>
+          <div class="form-group" style="margin-top:18px;">
+            <label>Custom topics</label>
+            <input type="text" id="pf-custom-topics" placeholder="e.g. biotech, EU policy" />
+          </div>
+        </div>
+
+        <!-- Step 3: News preferences -->
+        <div class="onboard-step" data-step="3">
+          <h2>News preferences</h2>
+          <p class="step-lead">How should Signal filter the world for you?</p>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Language</label>
+              <select id="pf-language">
+                <option value="English">English</option>
+                <option value="Arabic">Arabic</option>
+                <option value="Spanish">Spanish</option>
+                <option value="French">French</option>
+                <option value="German">German</option>
+                <option value="Portuguese">Portuguese</option>
+                <option value="Hindi">Hindi</option>
+                <option value="Turkish">Turkish</option>
+                <option value="Indonesian">Indonesian</option>
+                <option value="Japanese">Japanese</option>
+                <option value="Korean">Korean</option>
+                <option value="Chinese">Chinese</option>
+                <option value="Other">Other</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Country</label>
+              <select id="pf-country">
+                <option value="United States">United States</option>
+                <option value="United Kingdom">United Kingdom</option>
+                <option value="Canada">Canada</option>
+                <option value="Australia">Australia</option>
+                <option value="Germany">Germany</option>
+                <option value="France">France</option>
+                <option value="Spain">Spain</option>
+                <option value="Italy">Italy</option>
+                <option value="Netherlands">Netherlands</option>
+                <option value="Sweden">Sweden</option>
+                <option value="Switzerland">Switzerland</option>
+                <option value="India">India</option>
+                <option value="China">China</option>
+                <option value="Japan">Japan</option>
+                <option value="South Korea">South Korea</option>
+                <option value="Singapore">Singapore</option>
+                <option value="UAE">UAE</option>
+                <option value="Saudi Arabia">Saudi Arabia</option>
+                <option value="Brazil">Brazil</option>
+                <option value="Mexico">Mexico</option>
+                <option value="Argentina">Argentina</option>
+                <option value="South Africa">South Africa</option>
+                <option value="Nigeria">Nigeria</option>
+                <option value="Egypt">Egypt</option>
+                <option value="Turkey">Turkey</option>
+                <option value="Indonesia">Indonesia</option>
+                <option value="Pakistan">Pakistan</option>
+                <option value="Philippines">Philippines</option>
+                <option value="Poland">Poland</option>
+                <option value="Other">Other</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>News scope</label>
+            <div class="option-chips" id="scope-chips">
+              <span class="option-chip" data-group="scope" onclick="selectSingleChip(this)">Local only</span>
+              <span class="option-chip" data-group="scope" onclick="selectSingleChip(this)">Regional</span>
+              <span class="option-chip" data-group="scope" onclick="selectSingleChip(this)">International</span>
+              <span class="option-chip selected" data-group="scope" onclick="selectSingleChip(this)">Mixed</span>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Digest length</label>
+            <div class="option-chips" id="length-chips">
+              <span class="option-chip" data-group="length" onclick="selectSingleChip(this)">Quick</span>
+              <span class="option-chip selected" data-group="length" onclick="selectSingleChip(this)">Standard</span>
+              <span class="option-chip" data-group="length" onclick="selectSingleChip(this)">Deep</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 4: Personalization -->
+        <div class="onboard-step" data-step="4">
+          <h2>Personalization</h2>
+          <p class="step-lead">Filter out noise and add sources you trust.</p>
+          <div class="form-group">
+            <label>Topics to avoid</label>
+            <div class="option-chips" id="avoid-chips">
+              <span class="option-chip multi" onclick="toggleChip(this)">Celebrity news</span>
+              <span class="option-chip multi" onclick="toggleChip(this)">Politics</span>
+              <span class="option-chip multi" onclick="toggleChip(this)">Sports</span>
+              <span class="option-chip multi" onclick="toggleChip(this)">Crypto</span>
+              <span class="option-chip multi" onclick="toggleChip(this)">Entertainment</span>
+            </div>
+            <input type="text" id="pf-avoid-custom" class="other-input" style="margin-top:10px;" placeholder="Other topics to filter out" />
+          </div>
+          <div class="form-group">
+            <label>Favorite sources <span class="label-optional">optional</span></label>
+            <textarea id="pf-sources" rows="2" placeholder="Websites, newsletters, YouTube channels, blogs…"></textarea>
+          </div>
+        </div>
+
+        <!-- Step 5: Profile summary -->
+        <div class="onboard-step" data-step="5">
+          <h2>Your Signal Profile</h2>
+          <p class="step-lead">Review before we build your intelligence feed.</p>
+          <div class="profile-summary-card" id="onboard-review"></div>
+        </div>
+
+        <div class="onboard-actions">
+          <button type="button" class="btn btn-secondary hidden" id="onboard-back" onclick="onboardBack()">Back</button>
+          <button type="button" class="btn btn-primary" id="onboard-next" onclick="onboardNext()">Continue</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <input type="hidden" id="pf-name" />
+
+  <!-- Dashboard -->
+  <div id="dashboard-view" class="dash-layout hidden">
+    <aside class="dash-sidebar">
+      <button class="dash-nav-item active" data-panel="overview" onclick="dashNav('overview')">Overview</button>
+      <button class="dash-nav-item" data-panel="digest" onclick="dashNav('digest')">Today's digest</button>
+      <button class="dash-nav-item" data-panel="profile" onclick="dashNav('profile')">Profile</button>
+      <button class="dash-nav-item" data-panel="settings" onclick="dashNav('settings')">Settings</button>
+    </aside>
+
+    <main class="dash-main">
+      <!-- Overview -->
+      <div class="dash-panel" id="panel-overview">
+        <div class="dash-header">
+          <h1 id="dash-greeting">Good afternoon</h1>
+          <p>Your live digest pulls from Tavily, RSS, Reddit, and YouTube — filtered to your profile.</p>
+          <div class="dash-meta">
+            <span class="meta-pill green">Profile locked</span>
+            <span class="meta-pill amber">Unlocks in <span id="lock-countdown">—</span></span>
+          </div>
+        </div>
+        <div class="dash-grid">
+          <div class="dash-card span-2">
+            <div class="dash-card-head">
+              <h3>Latest digest</h3>
+              <div class="digest-actions">
+                <button class="btn btn-primary btn-sm" id="btn-generate-digest" onclick="generateDashboardDigest()">Generate today</button>
+                <button class="btn btn-secondary btn-sm" onclick="sendDigestEmail()">Email me</button>
+              </div>
+            </div>
+            <div class="digest-panel">
+              <div id="digest-output" class="digest-content empty">Loading…</div>
+              <p class="source-badge" id="digest-source-note"></p>
+            </div>
+          </div>
+          <div class="dash-card">
+            <div class="dash-card-head"><h3>Quick profile</h3></div>
+            <div class="profile-row"><span class="label">Role</span><span id="dp-profession">—</span></div>
+            <div class="profile-row"><span class="label">Goal</span><span id="dp-goal">—</span></div>
+            <div class="profile-row"><span class="label">Topics</span><div class="profile-tags" id="dp-tags"></div></div>
+            <div class="profile-row"><span class="label">Scope</span><span id="dp-scope">—</span></div>
+          </div>
+          <div class="dash-card">
+            <div class="dash-card-head"><h3>Filters</h3></div>
+            <div class="profile-row"><span class="label">Avoid</span><span id="dp-avoid">—</span></div>
+            <div class="profile-row"><span class="label">Length</span><span id="dp-length">—</span></div>
+            <div class="profile-row"><span class="label">Region</span><span id="dp-region">—</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Digest panel -->
+      <div class="dash-panel hidden" id="panel-digest">
+        <div class="dash-header">
+          <h1>Today's digest</h1>
+          <p>Regenerate anytime — each run uses fresh live sources.</p>
+        </div>
+        <div class="dash-card">
+          <div class="digest-actions" style="margin-bottom:16px;">
+            <button class="btn btn-primary" onclick="generateDashboardDigest()">Generate today</button>
+            <button class="btn btn-secondary" onclick="sendDigestEmail()">Email to inbox</button>
+          </div>
+          <div id="digest-output-full" class="digest-content empty">Use Generate to load your brief.</div>
+          <p class="source-badge" id="digest-source-note-full"></p>
+        </div>
+      </div>
+
+      <!-- Profile panel -->
+      <div class="dash-panel hidden" id="panel-profile">
+        <div class="dash-header">
+          <h1>Your digest profile</h1>
+          <p>Locked for 7 days after confirmation so relevance can stabilize.</p>
+        </div>
+        <div class="dash-card">
+          <div class="profile-row"><span class="label">Role</span><span id="dp-profession-2">—</span></div>
+          <div class="profile-row"><span class="label">Goal</span><span id="dp-goal-2">—</span></div>
+          <div class="profile-row"><span class="label">Topics</span><div class="profile-tags" id="dp-tags-2"></div></div>
+          <div class="profile-row"><span class="label">Language</span><span id="dp-language">—</span></div>
+          <div class="profile-row"><span class="label">Country</span><span id="dp-country">—</span></div>
+          <div class="profile-row"><span class="label">Scope</span><span id="dp-scope-2">—</span></div>
+          <div class="profile-row"><span class="label">Length</span><span id="dp-length-2">—</span></div>
+          <div class="profile-row"><span class="label">Sources</span><span id="dp-sources">—</span></div>
+          <div class="profile-row"><span class="label">Avoid</span><span id="dp-avoid-2">—</span></div>
+        </div>
+      </div>
+
+      <!-- Settings panel -->
+      <div class="dash-panel hidden" id="panel-settings">
+        <div class="dash-header">
+          <h1>Settings</h1>
+          <p>Update your delivery notifications, geographic scope, and summarization preferences.</p>
+        </div>
+        <div class="dash-grid">
+          <div class="dash-card span-2">
+            <div class="dash-card-head">
+              <h3>Delivery & Localization</h3>
+            </div>
+            
+            <div class="form-row" style="margin-bottom: 16px;">
+              <div class="form-group">
+                <label for="settings-digest-time">Digest Time</label>
+                <select id="settings-digest-time">
+                  <option value="05:00">05:00 AM</option>
+                  <option value="06:00">06:00 AM</option>
+                  <option value="07:00">07:00 AM</option>
+                  <option value="08:00">08:00 AM</option>
+                  <option value="09:00">09:00 AM</option>
+                  <option value="10:00">10:00 AM</option>
+                  <option value="12:00">12:00 PM</option>
+                  <option value="18:00">06:00 PM</option>
+                  <option value="20:00">08:00 PM</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="settings-timezone">Timezone</label>
+                <select id="settings-timezone">
+                  <option value="UTC">UTC (GMT+0)</option>
+                  <option value="America/New_York">New York (EST/EDT, GMT-5)</option>
+                  <option value="America/Chicago">Chicago (CST/CDT, GMT-6)</option>
+                  <option value="America/Denver">Denver (MST/MDT, GMT-7)</option>
+                  <option value="America/Los_Angeles">Los Angeles (PST/PDT, GMT-8)</option>
+                  <option value="Europe/London">London (GMT/BST, GMT+0)</option>
+                  <option value="Europe/Paris">Paris / Central Europe (CET/CEST, GMT+1)</option>
+                  <option value="Asia/Riyadh">Riyadh (AST, GMT+3)</option>
+                  <option value="Asia/Dubai">Dubai (GST, GMT+4)</option>
+                  <option value="Asia/Kolkata">Kolkata / India (IST, GMT+5:30)</option>
+                  <option value="Asia/Singapore">Singapore (SGT, GMT+8)</option>
+                  <option value="Asia/Tokyo">Tokyo (JST, GMT+9)</option>
+                  <option value="Australia/Sydney">Sydney (AEST/AEDT, GMT+10)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="form-row" style="margin-bottom: 16px;">
+              <div class="form-group">
+                <label for="settings-language">Language</label>
+                <select id="settings-language">
+                  <option value="English">English</option>
+                  <option value="Arabic">Arabic</option>
+                  <option value="Spanish">Spanish</option>
+                  <option value="French">French</option>
+                  <option value="German">German</option>
+                  <option value="Portuguese">Portuguese</option>
+                  <option value="Hindi">Hindi</option>
+                  <option value="Turkish">Turkish</option>
+                  <option value="Indonesian">Indonesian</option>
+                  <option value="Japanese">Japanese</option>
+                  <option value="Korean">Korean</option>
+                  <option value="Chinese">Chinese</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="settings-country">Region / Country</label>
+                <select id="settings-country">
+                  <option value="United States">United States</option>
+                  <option value="United Kingdom">United Kingdom</option>
+                  <option value="Canada">Canada</option>
+                  <option value="Australia">Australia</option>
+                  <option value="Germany">Germany</option>
+                  <option value="France">France</option>
+                  <option value="Spain">Spain</option>
+                  <option value="Italy">Italy</option>
+                  <option value="Netherlands">Netherlands</option>
+                  <option value="Singapore">Singapore</option>
+                  <option value="India">India</option>
+                  <option value="Saudi Arabia">Saudi Arabia</option>
+                  <option value="UAE">UAE</option>
+                  <option value="Brazil">Brazil</option>
+                  <option value="Japan">Japan</option>
+                  <option value="South Korea">South Korea</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="dash-card span-2">
+            <div class="dash-card-head">
+              <h3>Content Preferences</h3>
+            </div>
+            <div class="form-row" style="margin-bottom: 16px;">
+              <div class="form-group">
+                <label for="settings-news-scope">News Scope</label>
+                <select id="settings-news-scope">
+                  <option value="Local only">Local only</option>
+                  <option value="Regional">Regional</option>
+                  <option value="International">International</option>
+                  <option value="Mixed">Mixed</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="settings-digest-length">Digest Length</label>
+                <select id="settings-digest-length">
+                  <option value="Quick">Quick (Concise summaries)</option>
+                  <option value="Standard">Standard (Balanced overview)</option>
+                  <option value="Deep">Deep (In-depth analysis)</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group" style="margin-bottom: 4px;">
+              <label for="settings-avoid">Topics to avoid</label>
+              <input type="text" id="settings-avoid" placeholder="e.g. celebrity news, politics, sports" />
+              <div class="field-hint">Comma-separated interests you would like to exclude from automated Tavily and feed searches.</div>
+            </div>
+          </div>
+
+          <div class="dash-card span-2" style="background: transparent; border: none; box-shadow: none; padding: 0; display: flex; justify-content: flex-end;">
+            <button class="btn btn-primary" id="btn-save-settings" onclick="saveDashboardSettings()">Save Changes</button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status"></div>
+<script src="/js/app.js"></script>
+</body>
+</html>
