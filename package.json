@@ -8,7 +8,6 @@
   },
   "scripts": {
     "dev": "node server.js",
-    "build": "echo 'No build phase needed for static web'",
     "start": "node server.js"
   },
   "dependencies": {
