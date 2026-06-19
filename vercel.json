@@ -1,6 +1,5 @@
 {
   "version": 2,
-  "outputDirectory": ".",
   "rewrites": [
     { "source": "/api/auth", "destination": "/api/auth.js" },
     { "source": "/api/chat", "destination": "/api/chat.js" },
