@@ -220,143 +220,320 @@ async function handleLogin() {
   }
 }
 
-// ── Onboarding wizard ───────────────────────────────────────────────────────
+// ── Conversational Onboarding ────────────────────────────────────────────────
+let onboardingMessages = [];
+let isSummaryRendered = false;
+
 function showOnboarding() {
   document.getElementById("landing-view").classList.add("hidden");
   document.getElementById("app-shell").style.display = "flex";
-  document.getElementById("phase-label").textContent = "Setup";
+  document.getElementById("phase-label").textContent = "Onboarding";
   document.getElementById("onboarding-view").classList.remove("hidden");
   document.getElementById("dashboard-view").classList.add("hidden");
 
-  const form = getSavedForm();
-  if (form.name) document.getElementById("pf-name").value = form.name;
-  if (form.customTopics) document.getElementById("pf-custom-topics").value = form.customTopics;
-  if (form.customSources) document.getElementById("pf-sources").value = form.customSources;
-  if (form.language) document.getElementById("pf-language").value = form.language;
-  if (form.country) document.getElementById("pf-country").value = form.country;
-
-  restoreChipGroup("role", form.profession, "pf-role-other");
-  restoreChipGroup("goal", form.goals, "pf-goal-other");
-  restoreChipGroup("scope", form.newsScope || "Mixed");
-  restoreChipGroup("length", form.digestLength || "Standard");
-
-  if (form.topics) {
-    const selected = form.topics.split(",").map((t) => t.trim().toLowerCase());
-    document.querySelectorAll("#topic-chips .option-chip").forEach((chip) => {
-      chip.classList.toggle("selected", selected.includes(chip.textContent.trim().toLowerCase()));
-    });
-  }
-  if (form.avoid) {
-    const avoidList = form.avoid.split(",").map((t) => t.trim().toLowerCase());
-    document.querySelectorAll("#avoid-chips .option-chip").forEach((chip) => {
-      chip.classList.toggle("selected", avoidList.includes(chip.textContent.trim().toLowerCase()));
-    });
-    const chipTexts = Array.from(document.querySelectorAll("#avoid-chips .option-chip.selected")).map((c) =>
-      c.textContent.trim().toLowerCase()
-    );
-    const customAvoid = form.avoid
-      .split(",")
-      .map((t) => t.trim())
-      .filter((t) => t && !chipTexts.includes(t.toLowerCase()))
-      .join(", ");
-    if (customAvoid) document.getElementById("pf-avoid-custom").value = customAvoid;
+  // Reset chat state
+  onboardingMessages = [];
+  isSummaryRendered = false;
+  const container = document.getElementById("onboard-chat-inner");
+  if (container) {
+    container.innerHTML = "";
   }
 
-  onboardStep = 1;
-  updateOnboardUI();
+  // Seed with initial prompt
+  const initialGreeting = "Hey! I'm your AI analyst. I'm here to build your personalized intelligence model for Sharflow. To get started, what is your profession or what kind of work do you do?";
+  onboardingMessages.push({ role: "assistant", content: initialGreeting });
+  renderOnboardMessage("assistant", initialGreeting);
 }
 
-function restoreChipGroup(group, value, otherInputId) {
-  if (!value) return;
-  const chips = document.querySelectorAll(`[data-group="${group}"]`);
-  let matched = false;
-  chips.forEach((chip) => {
-    const isMatch = chip.textContent.trim() === value;
-    chip.classList.toggle("selected", isMatch);
-    if (isMatch) matched = true;
-  });
-  if (!matched && otherInputId) {
-    const otherChip = document.querySelector(`[data-group="${group}"][data-other]`);
-    if (otherChip) {
-      otherChip.classList.add("selected");
-      const input = document.getElementById(otherInputId);
-      if (input) {
-        input.classList.remove("hidden");
-        input.value = value;
+function renderOnboardMessage(role, content) {
+  const container = document.getElementById("onboard-chat-inner");
+  if (!container) return;
+
+  const msgDiv = document.createElement("div");
+  msgDiv.className = `msg ${role === "user" ? "user" : "bot"}`;
+
+  if (role !== "user") {
+    const avatar = document.createElement("div");
+    avatar.className = "msg-avatar";
+    avatar.textContent = "S";
+    msgDiv.appendChild(avatar);
+  }
+
+  const bubble = document.createElement("div");
+  bubble.className = "msg-bubble";
+  
+  if (role === "user") {
+    bubble.textContent = content;
+  } else {
+    bubble.innerHTML = formatBotHtml(content);
+  }
+  msgDiv.appendChild(bubble);
+  container.appendChild(msgDiv);
+
+  const scrollContainer = document.getElementById("onboard-chat-messages");
+  if (scrollContainer) {
+    scrollContainer.scrollTop = scrollContainer.scrollHeight;
+  }
+}
+
+function showOnboardTypingIndicator() {
+  const container = document.getElementById("onboard-chat-inner");
+  if (!container || document.getElementById("onboard-typing-indicator")) return;
+
+  const flowDiv = document.createElement("div");
+  flowDiv.className = "typing-row";
+  flowDiv.id = "onboard-typing-indicator";
+
+  const avatar = document.createElement("div");
+  avatar.className = "msg-avatar";
+  avatar.textContent = "S";
+  flowDiv.appendChild(avatar);
+
+  const bubble = document.createElement("div");
+  bubble.className = "typing-bubble";
+  bubble.innerHTML = "<span></span><span></span><span></span>";
+  flowDiv.appendChild(bubble);
+
+  container.appendChild(flowDiv);
+
+  const scrollContainer = document.getElementById("onboard-chat-messages");
+  if (scrollContainer) {
+    scrollContainer.scrollTop = scrollContainer.scrollHeight;
+  }
+}
+
+function hideOnboardTypingIndicator() {
+  const el = document.getElementById("onboard-typing-indicator");
+  if (el) el.remove();
+}
+
+async function sendOnboardChatMessage() {
+  const el = document.getElementById("onboard-chat-input");
+  if (!el) return;
+  const val = el.value.trim();
+  if (!val) return;
+
+  el.value = "";
+  el.disabled = true;
+  const btn = document.getElementById("btn-onboard-chat-send");
+  if (btn) btn.disabled = true;
+
+  // Render user message
+  onboardingMessages.push({ role: "user", content: val });
+  renderOnboardMessage("user", val);
+
+  // Show typing indicator
+  showOnboardTypingIndicator();
+
+  try {
+    if (isSummaryRendered) {
+      // Send adjustment to apiChat
+      const res = await apiChat({
+        action: "summary",
+        messages: onboardingMessages,
+        adjustment: val
+      });
+      hideOnboardTypingIndicator();
+      if (res.content) {
+        // Render updated summary!
+        const container = document.getElementById("onboard-chat-inner");
+        if (container) {
+          const summaryDiv = document.createElement("div");
+          summaryDiv.className = "msg bot";
+          
+          const avatar = document.createElement("div");
+          avatar.className = "msg-avatar";
+          avatar.textContent = "S";
+          summaryDiv.appendChild(avatar);
+
+          const bubble = document.createElement("div");
+          bubble.className = "msg-bubble";
+          bubble.style.background = "var(--surface-2)";
+          bubble.style.border = "1px solid var(--border)";
+          bubble.style.padding = "20px";
+          bubble.style.borderRadius = "var(--radius)";
+          bubble.style.width = "100%";
+
+          bubble.innerHTML = `
+            <h3 style="margin-bottom:12px;font-family:var(--serif);font-size:1.35rem;">Updated Intelligence Profile</h3>
+            <div style="font-size:14px;line-height:1.6;white-space:pre-wrap;margin-bottom:20px;">${escapeHtml(res.content)}</div>
+            <div class="summary-actions" style="display:flex;gap:10px;">
+              <button class="btn btn-primary" onclick="confirmConversationalProfile('${escapeJS(res.content)}')" style="flex:1;">Confirm & Open Dashboard ✓</button>
+            </div>
+          `;
+          summaryDiv.appendChild(bubble);
+          container.appendChild(summaryDiv);
+
+          const scrollContainer = document.getElementById("onboard-chat-messages");
+          if (scrollContainer) {
+            scrollContainer.scrollTop = scrollContainer.scrollHeight;
+          }
+        }
+      }
+    } else {
+      const res = await apiChat({
+        action: "chat",
+        messages: onboardingMessages
+      });
+
+      hideOnboardTypingIndicator();
+
+      if (res.content) {
+        onboardingMessages.push({ role: "assistant", content: res.content });
+        renderOnboardMessage("assistant", res.content);
+
+        // Check if we are ready to wrap up
+        if (res.readyForSummary || res.content.toLowerCase().includes("got everything i need")) {
+          isSummaryRendered = true;
+          // Trigger profile summary drafting!
+          await getAndRenderProfileSummaryDraft();
+        }
       }
     }
-  }
-}
-
-function updateOnboardUI() {
-  document.querySelectorAll(".onboard-step").forEach((el) => {
-    el.classList.toggle("active", Number(el.dataset.step) === onboardStep);
-  });
-
-  const pct = (onboardStep / ONBOARD_STEPS) * 100;
-  const fill = document.getElementById("progress-fill");
-  const label = document.getElementById("progress-label");
-  if (fill) fill.style.width = `${pct}%`;
-  if (label) label.textContent = `Step ${onboardStep} of ${ONBOARD_STEPS}`;
-
-  document.getElementById("onboard-back").classList.toggle("hidden", onboardStep === 1);
-  const nextBtn = document.getElementById("onboard-next");
-  nextBtn.textContent = onboardStep === ONBOARD_STEPS ? "Confirm & open dashboard" : "Continue";
-  nextBtn.disabled = false;
-}
-
-function onboardBack() {
-  if (onboardStep > 1) {
-    onboardStep--;
-    updateOnboardUI();
-  }
-}
-
-function selectSingleChip(el) {
-  const group = el.dataset.group;
-  document.querySelectorAll(`[data-group="${group}"]`).forEach((c) => c.classList.remove("selected"));
-  el.classList.add("selected");
-
-  const otherKey = el.dataset.other;
-  if (otherKey) {
-    const input = document.getElementById(`pf-${otherKey}-other`);
-    if (input) {
-      input.classList.remove("hidden");
-      input.focus();
+  } catch (err) {
+    hideOnboardTypingIndicator();
+    toast("Error: " + err.message);
+  } finally {
+    if (el) {
+      el.disabled = false;
+      el.focus();
     }
-  } else {
-    const input = document.getElementById(`pf-${group}-other`);
-    if (input) {
-      input.classList.add("hidden");
-      input.value = "";
+    if (btn) btn.disabled = false;
+  }
+}
+
+function handleOnboardChatKey(e) {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendOnboardChatMessage();
+  }
+}
+
+async function getAndRenderProfileSummaryDraft() {
+  showOnboardTypingIndicator();
+  try {
+    const res = await apiChat({
+      action: "summary",
+      messages: onboardingMessages
+    });
+    hideOnboardTypingIndicator();
+
+    if (res.content) {
+      const container = document.getElementById("onboard-chat-inner");
+      if (!container) return;
+
+      const summaryDiv = document.createElement("div");
+      summaryDiv.className = "msg bot";
+      
+      const avatar = document.createElement("div");
+      avatar.className = "msg-avatar";
+      avatar.textContent = "S";
+      summaryDiv.appendChild(avatar);
+
+      const bubble = document.createElement("div");
+      bubble.className = "msg-bubble";
+      bubble.style.background = "var(--surface-2)";
+      bubble.style.border = "1px solid var(--border)";
+      bubble.style.padding = "20px";
+      bubble.style.borderRadius = "var(--radius)";
+      bubble.style.width = "100%";
+
+      bubble.innerHTML = `
+        <h3 style="margin-bottom:12px;font-family:var(--serif);font-size:1.35rem;">Draft Intelligence Profile</h3>
+        <div style="font-size:14px;line-height:1.6;white-space:pre-wrap;margin-bottom:20px;">${escapeHtml(res.content)}</div>
+        <div class="summary-actions" style="display:flex;gap:10px;">
+          <button class="btn btn-primary" onclick="confirmConversationalProfile('${escapeJS(res.content)}')" style="flex:1;">Confirm & Open Dashboard ✓</button>
+        </div>
+      `;
+      summaryDiv.appendChild(bubble);
+      container.appendChild(summaryDiv);
+
+      const scrollContainer = document.getElementById("onboard-chat-messages");
+      if (scrollContainer) {
+        scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      }
+    }
+  } catch (err) {
+    hideOnboardTypingIndicator();
+    toast("Failed to draft profile summary: " + err.message);
+  }
+}
+
+function escapeJS(str) {
+  return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+}
+
+async function confirmConversationalProfile(summaryText) {
+  const form = {};
+  form.name = localStorage.getItem(STORAGE.email)?.split("@")[0] || "User";
+  
+  // Parse fields
+  const professionMatch = summaryText.match(/Role:\s*([^\n]+)/i) || summaryText.match(/Who they are:\s*([^\n]+)/i);
+  form.profession = professionMatch ? professionMatch[1].trim() : "Specialist";
+  
+  const goalsMatch = summaryText.match(/Goals:\s*([^\n]+)/i) || summaryText.match(/Topics & sources to emphasize:\s*([^\n]+)/i);
+  form.goals = goalsMatch ? goalsMatch[1].trim() : "Stay informed";
+  
+  const topicsMatch = summaryText.match(/Topics:\s*([^\n]+)/i) || summaryText.match(/Focus:\s*([^\n]+)/i);
+  form.topics = topicsMatch ? topicsMatch[1].trim() : "Technology, AI, Startups";
+  
+  const avoidMatch = summaryText.match(/Avoid:\s*([^\n]+)/i) || summaryText.match(/What to avoid:\s*([^\n]+)/i);
+  form.avoid = avoidMatch ? avoidMatch[1].trim() : "Celebrity news, generic blogs";
+  
+  const customSourcesMatch = summaryText.match(/Sources:\s*([^\n]+)/i) || summaryText.match(/Custom sources:\s*([^\n]+)/i);
+  form.customSources = customSourcesMatch ? customSourcesMatch[1].trim() : "";
+  
+  form.language = "English";
+  form.country = "United States";
+  form.newsScope = "Mixed";
+  form.digestLength = "Standard";
+  form.digestTime = "08:00";
+  form.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  form.tone = "balanced";
+
+  localStorage.setItem(STORAGE.profileForm, JSON.stringify(form));
+  localStorage.setItem(STORAGE.profile, summaryText);
+
+  const lockUntil = new Date();
+  lockUntil.setDate(lockUntil.getDate() + 7);
+  localStorage.setItem(STORAGE.lock, lockUntil.toISOString());
+
+  const savedEmail = localStorage.getItem(STORAGE.email) || "";
+  const token = localStorage.getItem(STORAGE.token) || "";
+
+  if (savedEmail) {
+    try {
+      await fetch("/api/user", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          name: form.name,
+          plan: localStorage.getItem(STORAGE.plan) || "starter",
+          lockedUntil: lockUntil.toISOString(),
+          profile: {
+            summary: summaryText,
+            profession: form.profession,
+            goals: form.goals,
+            topics: form.topics,
+            avoid: form.avoid,
+            customSources: form.customSources,
+            language: form.language,
+            country: form.country,
+            newsScope: form.newsScope,
+            digestLength: form.digestLength,
+            tone: form.tone,
+            digestTime: form.digestTime,
+            timezone: form.timezone,
+          },
+        }),
+      });
+    } catch (err) {
+      console.warn("Saving profile to DB failed:", err);
     }
   }
-}
 
-function getSingleChipValue(group, otherInputId) {
-  const selected = document.querySelector(`[data-group="${group}"].selected`);
-  if (!selected) return "";
-  if (selected.dataset.other) {
-    return document.getElementById(otherInputId)?.value.trim() || "";
-  }
-  return selected.textContent.trim();
-}
-
-function toggleChip(el) {
-  el.classList.toggle("selected");
-}
-
-function getSelectedChips(selector) {
-  return Array.from(document.querySelectorAll(`${selector}.selected`)).map((el) =>
-    el.textContent.trim()
-  );
-}
-
-function collectAvoidTopics() {
-  const chips = getSelectedChips("#avoid-chips .option-chip");
-  const custom = document.getElementById("pf-avoid-custom")?.value.trim() || "";
-  const extra = custom ? custom.split(",").map((t) => t.trim()).filter(Boolean) : [];
-  return [...chips, ...extra].filter(Boolean).join(", ");
+  showDashboard(lockUntil, summaryText);
+  generateDashboardDigest(true);
 }
 
 function digestLengthToTone(length) {
@@ -379,138 +556,6 @@ function buildProfileSummaryText(form) {
   ]
     .filter(Boolean)
     .join("\n");
-}
-
-function onboardNext() {
-  if (onboardStep === 1) {
-    const role = getSingleChipValue("role", "pf-role-other");
-    const goal = getSingleChipValue("goal", "pf-goal-other");
-    if (!role) { toast("Select your role."); return; }
-    if (!goal) { toast("Select your primary goal."); return; }
-    profileFormData.profession = role;
-    profileFormData.goals = goal;
-    profileFormData.name = document.getElementById("pf-name").value.trim() || undefined;
-  } else if (onboardStep === 2) {
-    const selected = getSelectedChips("#topic-chips .option-chip");
-    const custom = document.getElementById("pf-custom-topics").value.trim();
-    const allTopics = [...selected, ...(custom ? custom.split(",").map((t) => t.trim()) : [])].filter(Boolean);
-    if (!allTopics.length) { toast("Pick at least one topic."); return; }
-    profileFormData.topics = allTopics.join(", ");
-    profileFormData.customTopics = custom || undefined;
-  } else if (onboardStep === 3) {
-    profileFormData.language = document.getElementById("pf-language").value;
-    profileFormData.country = document.getElementById("pf-country").value;
-    profileFormData.newsScope = getSingleChipValue("scope") || "Mixed";
-    profileFormData.digestLength = getSingleChipValue("length") || "Standard";
-    profileFormData.digestTime = "08:00";
-    profileFormData.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-  } else if (onboardStep === 4) {
-    profileFormData.avoid = collectAvoidTopics() || undefined;
-    profileFormData.customSources = document.getElementById("pf-sources").value.trim() || undefined;
-    profileFormData.tone = digestLengthToTone(profileFormData.digestLength);
-    renderOnboardReview();
-  } else if (onboardStep === 5) {
-    confirmProfile();
-    return;
-  }
-
-  onboardStep++;
-  updateOnboardUI();
-  if (onboardStep === 5) renderOnboardReview();
-}
-
-function renderOnboardReview() {
-  const el = document.getElementById("onboard-review");
-  const rows = [
-    ["Role", profileFormData.profession],
-    ["Goal", profileFormData.goals],
-    ["Topics", profileFormData.topics],
-    ["Language", profileFormData.language],
-    ["Country", profileFormData.country],
-    ["News scope", profileFormData.newsScope],
-    ["Digest length", profileFormData.digestLength],
-    ["Avoid", profileFormData.avoid || "Nothing specified"],
-    ["Sources", profileFormData.customSources || "Default curated feeds"],
-  ];
-  el.innerHTML = rows
-    .map(
-      ([k, v]) =>
-        `<div class="profile-row"><span class="label">${escapeHtml(k)}</span><span>${escapeHtml(v || "—")}</span></div>`
-    )
-    .join("");
-}
-
-async function confirmProfile() {
-  const btn = document.getElementById("onboard-next");
-  btn.disabled = true;
-  btn.textContent = "Setting up…";
-
-  Object.keys(profileFormData).forEach((k) => {
-    if (profileFormData[k] == null || profileFormData[k] === "") delete profileFormData[k];
-  });
-  localStorage.setItem(STORAGE.profileForm, JSON.stringify(profileFormData));
-
-  const profileText = buildProfileSummaryText(profileFormData);
-  const lockUntil = new Date();
-  lockUntil.setDate(lockUntil.getDate() + 7);
-  const savedEmail = localStorage.getItem(STORAGE.email) || "";
-
-  localStorage.setItem(STORAGE.lock, lockUntil.toISOString());
-  localStorage.setItem(STORAGE.profile, profileText);
-
-  if (savedEmail) {
-    const token = localStorage.getItem(STORAGE.token) || "";
-    try {
-      const saveRes = await fetch("/api/user", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          name: profileFormData.name || "",
-          plan: localStorage.getItem(STORAGE.plan) || "starter",
-          lockedUntil: lockUntil.toISOString(),
-          profile: {
-            summary: profileText,
-            profession: profileFormData.profession || "",
-            goals: profileFormData.goals || "",
-            topics: profileFormData.topics || "",
-            avoid: profileFormData.avoid || "",
-            customSources: profileFormData.customSources || "",
-            language: profileFormData.language || "English",
-            country: profileFormData.country || "",
-            newsScope: profileFormData.newsScope || "Mixed",
-            digestLength: profileFormData.digestLength || "Standard",
-            tone: profileFormData.tone || "",
-            digestTime: profileFormData.digestTime || "08:00",
-            timezone: profileFormData.timezone || "UTC",
-          },
-        }),
-      });
-      if (saveRes.ok) {
-        const userRes = await fetch("/api/user", { headers: authHeaders() });
-        if (userRes.ok) {
-          const userData = await userRes.json();
-          if (userData.user?.memory) userMemory = userData.user.memory;
-        }
-      }
-      fetch("/api/send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "welcome",
-          email: savedEmail,
-          name: profileFormData.name || "",
-          profileSummary: profileText,
-          unlockDate: lockUntil.toLocaleDateString(undefined,
-            { month: "long", day: "numeric", year: "numeric" }),
-        }),
-      }).catch(() => {});
-    } catch (err) {
-      console.warn("Profile save:", err.message);
-    }
-  }
-
-  showDashboard(lockUntil, profileText);
-  generateDashboardDigest(true);
 }
 
 async function apiChat(body) {
@@ -1130,10 +1175,9 @@ window.closeAuthModal = closeAuthModal;
 window.switchAuthTab = switchAuthTab;
 window.handleSignup = handleSignup;
 window.handleLogin = handleLogin;
-window.toggleChip = toggleChip;
-window.selectSingleChip = selectSingleChip;
-window.onboardBack = onboardBack;
-window.onboardNext = onboardNext;
+window.sendOnboardChatMessage = sendOnboardChatMessage;
+window.handleOnboardChatKey = handleOnboardChatKey;
+window.confirmConversationalProfile = confirmConversationalProfile;
 window.generateDashboardDigest = generateDashboardDigest;
 window.sendDigestEmail = sendDigestEmail;
 window.dashNav = dashNav;

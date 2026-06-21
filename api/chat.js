@@ -255,16 +255,15 @@ async function handler(req, res) {
           : "";
 
       const userPrompt = `${profileFormText}FOLLOW-UP CHAT:\n${transcript}${adj}\n\n---
-Write a concise profile summary the user will approve before their first digest. Use clear sections:
+Write a highly personalized, sharp profile summary of this user. Formulate it starting with these exact labels for parsing, followed by a professional summary detail:
 
-1) Who they are (name if given, role, context)
-2) Topics & sources to emphasize
-3) What to avoid / filter out
-4) Custom sources (websites, YouTube channels, X accounts) if mentioned
-5) Tone & format preference for daily email
-6) What their digest will typically include (4–5 short bullets)
+Who they are: [A tight, non-generic description of their profession, focus area, and current projects]
+Topics & sources to emphasize: [Their main drivers, business goals or learning aspirations]
+Focus: [Primary topics and domains to scan the world for]
+What to avoid: [Specific noises, low-value topics, or generic themes they want filtered out]
+Custom sources: [Websites, blogs, newsletter names, or outlets they trust, if any. Otherwise write "None"]
 
-End with exactly this line on its own:
+Provide a 3-4 sentence paragraph summarizing what their digest will typically target and how we will filter the noise for them. At the very end of your response, add:
 "Does this look right? Adjust in chat, or tap Confirm to lock your profile."`;
 
       let content = "";

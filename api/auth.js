@@ -71,8 +71,21 @@ async function handler(req, res) {
     try {
       const decoded = verifyToken(token, jwtSecret);
       const db = await getDb();
-      const user = await db.collection("users").findOne({ email: decoded.email });
-      if (!user) return res.status(404).json({ error: "User not found" });
+      let user = await db.collection("users").findOne({ email: decoded.email });
+      if (!user) {
+        const now = new Date();
+        user = {
+          email: decoded.email,
+          name: decoded.name || decoded.email.split("@")[0] || "User",
+          passwordHash: "",
+          plan: "starter",
+          active: true,
+          profile: null,
+          createdAt: now,
+          updatedAt: now,
+        };
+        await db.collection("users").insertOne(user);
+      }
       return res.status(200).json({ ok: true, user: safeUser(user) });
     } catch (err) {
       return res.status(401).json({ error: "Invalid or expired token" });

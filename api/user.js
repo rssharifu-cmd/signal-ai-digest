@@ -63,8 +63,21 @@ async function handler(req, res) {
     const users = db.collection("users");
 
     if (req.method === "GET") {
-      const user = await users.findOne({ email });
-      if (!user) return res.status(404).json({ error: "User not found" });
+      let user = await users.findOne({ email });
+      if (!user) {
+        const now = new Date();
+        user = {
+          email,
+          name: email.split("@")[0] || "User",
+          passwordHash: "",
+          plan: "starter",
+          active: true,
+          profile: null,
+          createdAt: now,
+          updatedAt: now,
+        };
+        await users.insertOne(user);
+      }
       return res.status(200).json({ ok: true, user: safeUser(user) });
     }
 
@@ -73,7 +86,21 @@ async function handler(req, res) {
       const now = new Date();
       const action = (body.action || "save").trim();
 
-      const user = await users.findOne({ email });
+      let user = await users.findOne({ email });
+      if (!user) {
+        const now = new Date();
+        user = {
+          email,
+          name: email.split("@")[0] || "User",
+          passwordHash: "",
+          plan: "starter",
+          active: true,
+          profile: null,
+          createdAt: now,
+          updatedAt: now,
+        };
+        await users.insertOne(user);
+      }
 
       // ── FEEDBACK — update memory from dashboard 👍/👎 ─────────────────────
       if (action === "feedback") {
@@ -159,11 +186,7 @@ async function handler(req, res) {
         update.$set.memory = memory;
       }
 
-      if (user) {
-        await users.updateOne({ email }, update);
-      } else {
-        return res.status(404).json({ error: "User not found. Complete signup first." });
-      }
+      await users.updateOne({ email }, update);
 
       return res.status(200).json({ ok: true, email });
     }

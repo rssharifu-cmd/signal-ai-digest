@@ -233,12 +233,12 @@ ${newsContext}`
 
   return `Generate a personalized intelligence brief for ONE specific user. Today is ${today}.
 
-USER MEMORY (personalization signals — use heavily):
+USER IS:
 ${memoryText || profileText}
 
 ${newsRules}
 
-OUTPUT FORMAT (follow exactly):
+OUTPUT FORMAT (follow exactly, preserving character dividers and icons):
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 YOUR SIGNAL · ${today}
@@ -246,40 +246,33 @@ YOUR SIGNAL · ${today}
 
 🔥 TOP STORIES
 
-① [Story headline from source]
-WHAT: [One clear sentence — the fact, no fluff]
-WHY YOU: [One sentence — why this matters for THIS user's role and goals]
-ACTION: [One concrete implication or move they could make]
+① [Story headline or synthesized high-conviction trend]
+[Synthesized Intelligence Paragraph: Make it 2-3 precise sentences max. Absolutely do not use labels like "WHAT:", "WHY YOU:", "ACTION:". Detail why this matters to this user, what changes next, and the precise opportunity, risk, or move to execute on. Write like a world-class strategic analyst briefs a founder.]
 → [source URL]
 
-② [Story headline]
-WHAT: [fact]
-WHY YOU: [personal relevance]
-ACTION: [implication]
+② [Next Story headline]
+[Synthesized Intelligence Paragraph... 2-3 sentences max. No headers or label tags. Rich in context and precision.]
 → [source URL]
 
 ③ [Story headline — only if strongly relevant]
-WHAT: [fact]
-WHY YOU: [personal relevance]
-ACTION: [implication]
+[Synthesized Intelligence Paragraph... 2-3 sentences max. No headers or label tags.]
 → [source URL]
 ${isPro ? `
 📺 VIDEO WORTH YOUR TIME
 "[Title]" · [Channel]
-WHY YOU: [1 sentence tied to goals]
-ACTION: [What to take from it]
+[Synthesized relevance & target takeaway — exactly 2 sentences, no headers or labels.]
 → [URL]
 ` : ""}
 💡 ONE THING TO DO TODAY
-[Single specific action aligned with their goals — not generic advice]
+[Actionable intelligence — what move should the user execute today based on these signals? Not generic advice.]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-STRICT RULES:
-- No generic AI hype, market summaries, or filler phrases.
-- No repeated sentence structures across items.
-- Every story MUST have WHAT / WHY YOU / ACTION lines.
-- Write like a sharp analyst briefing one person, not a newsletter.`;
+STRICT WRITING DIRECTIVES:
+- NO LABELS: Never write "WHAT:", "WHY YOU:", "ACTION:", "WHY IT MATTERS:", or "IMPLICATION:". Deliver pure synthesized intelligence.
+- NO CLINICAL AI HYPNOTICS: Never use phrases like "may have implications", "could impact", "important to understand", "as a professional in...", "significant development", "it is critical to".
+- INSIGHT FIRST: Do not write "AI is transforming industries." Instead write: "Small agencies are starting to substitute whole creative departments with local open-source pipelines."
+- BE PRECISE AND DIRECT: Provide concrete figures, realistic scenarios, or sharp opportunism. Sound like a smart, elite colleague.`;
 }
 
 module.exports = {
