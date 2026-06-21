@@ -224,6 +224,18 @@ async function handleLogin() {
 let onboardingMessages = [];
 let isSummaryRendered = false;
 
+function updateConversationalProgress() {
+  const fill = document.getElementById("conversational-progress-fill");
+  if (!fill) return;
+  if (isSummaryRendered) {
+    fill.style.width = "100%";
+    return;
+  }
+  const userMessagesCount = onboardingMessages.filter(m => m.role === "user").length;
+  const pct = Math.min((userMessagesCount + 1) * 20, 100);
+  fill.style.width = `${pct}%`;
+}
+
 function showOnboarding() {
   document.getElementById("landing-view").classList.add("hidden");
   document.getElementById("app-shell").style.display = "flex";
@@ -240,7 +252,7 @@ function showOnboarding() {
   }
 
   // Seed with initial prompt
-  const initialGreeting = "Hey! I'm your AI analyst. I'm here to build your personalized intelligence model for Sharflow. To get started, what is your profession or what kind of work do you do?";
+  const initialGreeting = "What do you do?";
   onboardingMessages.push({ role: "assistant", content: initialGreeting });
   renderOnboardMessage("assistant", initialGreeting);
 }
@@ -274,6 +286,7 @@ function renderOnboardMessage(role, content) {
   if (scrollContainer) {
     scrollContainer.scrollTop = scrollContainer.scrollHeight;
   }
+  updateConversationalProgress();
 }
 
 function showOnboardTypingIndicator() {
@@ -356,7 +369,8 @@ async function sendOnboardChatMessage() {
 
           bubble.innerHTML = `
             <h3 style="margin-bottom:12px;font-family:var(--serif);font-size:1.35rem;">Updated Intelligence Profile</h3>
-            <div style="font-size:14px;line-height:1.6;white-space:pre-wrap;margin-bottom:20px;">${escapeHtml(res.content)}</div>
+            <div style="font-size:14px;line-height:1.6;white-space:pre-wrap;margin-bottom:12px;color:var(--text);">${escapeHtml(res.content)}</div>
+            <p style="font-size:12px;color:var(--text-muted);margin-bottom:18px;font-style:italic;">Does this look right? Adjust in chat, or tap Confirm to lock your profile.</p>
             <div class="summary-actions" style="display:flex;gap:10px;">
               <button class="btn btn-primary" onclick="confirmConversationalProfile('${escapeJS(res.content)}')" style="flex:1;">Confirm & Open Dashboard ✓</button>
             </div>
@@ -440,7 +454,8 @@ async function getAndRenderProfileSummaryDraft() {
 
       bubble.innerHTML = `
         <h3 style="margin-bottom:12px;font-family:var(--serif);font-size:1.35rem;">Draft Intelligence Profile</h3>
-        <div style="font-size:14px;line-height:1.6;white-space:pre-wrap;margin-bottom:20px;">${escapeHtml(res.content)}</div>
+        <div style="font-size:14px;line-height:1.6;white-space:pre-wrap;margin-bottom:12px;color:var(--text);">${escapeHtml(res.content)}</div>
+        <p style="font-size:12px;color:var(--text-muted);margin-bottom:18px;font-style:italic;">Does this look right? Adjust in chat, or tap Confirm to lock your profile.</p>
         <div class="summary-actions" style="display:flex;gap:10px;">
           <button class="btn btn-primary" onclick="confirmConversationalProfile('${escapeJS(res.content)}')" style="flex:1;">Confirm & Open Dashboard ✓</button>
         </div>
@@ -468,16 +483,16 @@ async function confirmConversationalProfile(summaryText) {
   form.name = localStorage.getItem(STORAGE.email)?.split("@")[0] || "User";
   
   // Parse fields
-  const professionMatch = summaryText.match(/Role:\s*([^\n]+)/i) || summaryText.match(/Who they are:\s*([^\n]+)/i);
+  const professionMatch = summaryText.match(/Who they are:\s*([^\n]+)/i) || summaryText.match(/Role:\s*([^\n]+)/i);
   form.profession = professionMatch ? professionMatch[1].trim() : "Specialist";
   
-  const goalsMatch = summaryText.match(/Goals:\s*([^\n]+)/i) || summaryText.match(/Topics & sources to emphasize:\s*([^\n]+)/i);
-  form.goals = goalsMatch ? goalsMatch[1].trim() : "Stay informed";
+  const goalsMatch = summaryText.match(/Preferred content style:\s*([^\n]+)/i) || summaryText.match(/Goals:\s*([^\n]+)/i) || summaryText.match(/Topics & sources to emphasize:\s*([^\n]+)/i);
+  form.goals = goalsMatch ? goalsMatch[1].trim() : "Balanced briefs";
   
-  const topicsMatch = summaryText.match(/Topics:\s*([^\n]+)/i) || summaryText.match(/Focus:\s*([^\n]+)/i);
+  const topicsMatch = summaryText.match(/Topics to cover:\s*([^\n]+)/i) || summaryText.match(/Topics:\s*([^\n]+)/i) || summaryText.match(/Focus:\s*([^\n]+)/i);
   form.topics = topicsMatch ? topicsMatch[1].trim() : "Technology, AI, Startups";
   
-  const avoidMatch = summaryText.match(/Avoid:\s*([^\n]+)/i) || summaryText.match(/What to avoid:\s*([^\n]+)/i);
+  const avoidMatch = summaryText.match(/What to avoid:\s*([^\n]+)/i) || summaryText.match(/Avoid:\s*([^\n]+)/i);
   form.avoid = avoidMatch ? avoidMatch[1].trim() : "Celebrity news, generic blogs";
   
   const customSourcesMatch = summaryText.match(/Sources:\s*([^\n]+)/i) || summaryText.match(/Custom sources:\s*([^\n]+)/i);
