@@ -39,6 +39,67 @@ function withTimeout(promise, ms) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+function getUTCHourForLocalTime(digestTime, timezone) {
+  let [localHourStr] = (digestTime || "08:00").split(":");
+  let targetHour = parseInt(localHourStr, 10);
+  if (isNaN(targetHour)) targetHour = 8;
+
+  const now = new Date();
+  try {
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone || "UTC",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    });
+    const formatterUTC = new Intl.DateTimeFormat("en-US", {
+      timeZone: "UTC",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    });
+
+    const parts = formatter.formatToParts(now);
+    const utcParts = formatterUTC.formatToParts(now);
+
+    const getVal = (pList, type) => parseInt(pList.find(p => p.type === type).value, 10);
+
+    const localDate = Date.UTC(
+      getVal(parts, "year"),
+      getVal(parts, "month") - 1,
+      getVal(parts, "day"),
+      getVal(parts, "hour"),
+      getVal(parts, "minute"),
+      getVal(parts, "second")
+    );
+
+    const utcDate = Date.UTC(
+      getVal(utcParts, "year"),
+      getVal(utcParts, "month") - 1,
+      getVal(utcParts, "day"),
+      getVal(utcParts, "hour"),
+      getVal(utcParts, "minute"),
+      getVal(utcParts, "second")
+    );
+
+    const diffMs = localDate - utcDate;
+    const diffHours = Math.round(diffMs / (1000 * 60 * 60));
+
+    return (targetHour - diffHours + 24) % 24;
+  } catch (err) {
+    console.error("Error converting local time to UTC hour: ", err.message);
+    return targetHour;
+  }
+}
+
 // ── FETCH NEWS (inline — avoids internal HTTP call) ───────────────────────────
 async function fetchNews(topics, profession, avoid) {
   const tavilyKey  = (process.env.TAVILY_API_KEY  || "").trim();
@@ -536,11 +597,13 @@ async function handler(req, res) {
           userHour = now.getUTCHours();
         }
 
-        const targetHour = parseInt(digestTimePreference.split(":")[0], 10);
+        // Get user's digestTime and timezone, convert to UTC hour
+        const targetUTCHour = getUTCHourForLocalTime(digestTimePreference, userTz);
+        const currentUTCHour = now.getUTCHours();
 
-        // 1. Check if the current user-local hour is the targeted delivery hour
-        if (userHour !== targetHour) {
-          console.log(`[${new Date().toISOString()}] [CRON] Skipping ${user.email} — current local hour ${userHour} does not match target hour ${targetHour}.`);
+        // 1. Check if current UTC hour matches target UTC hour
+        if (currentUTCHour !== targetUTCHour) {
+          console.log(`[${new Date().toISOString()}] [CRON] Skipping ${user.email} — current UTC hour ${currentUTCHour} does not match target UTC hour ${targetUTCHour} (preferred local ${digestTimePreference} in ${userTz}).`);
           results.skipped++;
           continue;
         }
