@@ -63,7 +63,10 @@ async function fetchNews(topics, profession, avoid) {
             : [],
         }),
       }), TIMEOUT_MS);
-      if (!res.ok) return [];
+      if (!res.ok) {
+        console.log(`[${new Date().toISOString()}] [CRON] Tavily bad response: fallback to RSS + Reddit`);
+        return [];
+      }
       const data = await res.json();
       return (data.results || []).map(r => ({
         source: "tavily",
@@ -71,7 +74,10 @@ async function fetchNews(topics, profession, avoid) {
         url: r.url || "",
         snippet: (r.content || r.snippet || "").slice(0, 400),
       }));
-    } catch { return []; }
+    } catch (err) {
+      console.log(`[${new Date().toISOString()}] [CRON] Tavily failed/timeout: fallback to RSS + Reddit. Error:`, err.message);
+      return [];
+    }
   }
 
   // --- Reddit ---
@@ -104,7 +110,10 @@ async function fetchNews(topics, profession, avoid) {
           url: `https://reddit.com${p.data?.permalink || ""}`,
           snippet: `${p.data?.ups || 0} upvotes · r/${p.data?.subreddit}`,
         }));
-    } catch { return []; }
+    } catch (err) {
+      console.log(`[${new Date().toISOString()}] [CRON] Reddit failed:`, err.message);
+      return [];
+    }
   }
 
   // --- RSS (matches dashboard pipeline) ---
@@ -146,7 +155,10 @@ async function fetchNews(topics, profession, avoid) {
         }
       }
       return items;
-    } catch { return []; }
+    } catch (err) {
+      console.log(`[${new Date().toISOString()}] [CRON] RSS failed:`, err.message);
+      return [];
+    }
   }
 
   // --- YouTube ---
@@ -172,7 +184,10 @@ async function fetchNews(topics, profession, avoid) {
         channel: item.snippet.channelTitle,
         url: `https://youtube.com/watch?v=${item.id.videoId}`,
       };
-    } catch { return null; }
+    } catch (err) {
+      console.log(`[${new Date().toISOString()}] [CRON] YouTube failed:`, err.message);
+      return null;
+    }
   }
 
   const [tavilyArticles, rssItems, redditPosts, video] = await Promise.all([
@@ -232,13 +247,47 @@ async function generateDigest(user, news) {
     profile.tone && `Tone: ${profile.tone}`,
   ].filter(Boolean).join("\n");
 
-  const prompt = buildDigestPrompt({
-    memoryText: memoryText || profileText,
-    profileText,
-    newsContext,
-    plan: user.plan || "starter",
-    today,
-  });
+  const prompt = `Generate a personalized intelligence brief for ONE specific user. Today is ${today}.
+
+USER IS:
+${memoryText || profileText}
+
+${newsContext}
+
+OUTPUT FORMAT (follow exactly, preserving character dividers and icons):
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+YOUR SIGNAL · ${today}
+
+🔥 TOP STORIES
+
+① [Story headline or synthesized high-conviction trend]
+[Synthesized Intelligence Paragraph: Strictly 2 sentences maximum. Sentence 1 must state what happened, sharp and specific. Sentence 2 must state what changes next, who benefits, or what opportunity exists. Absolutely do not use labels like "WHAT:", "WHY YOU:", "ACTION:", "WHY IT MATTERS:", or "IMPLICATION:". Do not use generic filler or clinical phrases like "As a professional in...", "Consider exploring...", "Monitor the situation...", "may have implications", "could impact", "important to understand", "significant development", "it is critical to". Write like an elite strategic advisor.]
+→ [source URL]
+
+② [Next Story headline]
+[Synthesized Intelligence Paragraph: Exactly 2 sentences maximum. Sentence 1: what happened. Sentence 2: what changes next/opportunity. No labels or procedural tags.]
+→ [source URL]
+
+③ [Story headline — only if strongly relevant]
+[Synthesized Intelligence Paragraph: Exactly 2 sentences maximum. Sentence 1: what happened. Sentence 2: what changes next/opportunity. No labels or procedural tags.]
+→ [source URL]
+${user.plan === "pro" ? `
+📺 VIDEO WORTH YOUR TIME
+[Synthesized relevance & target takeaway — exactly 2 sentences, no headers or labels.]
+→ [URL]
+` : ""}
+💡 ONE THING TO DO TODAY
+[Actionable intelligence — what move should the user execute today based on these signals? Not generic advice.]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STRICT WRITING DIRECTIVES:
+- NO LABELS: Never write "WHAT:", "WHY YOU:", "ACTION:", "WHY IT MATTERS:", or "IMPLICATION:". Deliver pure synthesized intelligence.
+- NO CLINICAL AI HYPNOTICS: Never use phrases like "may have implications", "could impact", "important to understand", "as a professional in...", "Consider exploring...", "Monitor the situation...", "significant development", "it is critical to".
+- EACH STORY MUST BE MAXIMUM 2 SENTENCES: Sentence 1 must state what happened (sharp and specific). Sentence 2 must state what changes next, who benefits, or what opportunity exists.
+- INSIGHT FIRST: Do not write "AI is transforming industries." Instead write: "Small agencies are starting to substitute whole creative departments with local open-source pipelines."
+- BE PRECISE AND DIRECT: Provide concrete figures, realistic scenarios, or sharp opportunism. Sound like a smart, elite colleague. Connect dots between stories where possible.`;
 
   // Use Gemini if available
   if (apiGeminiKey) {
@@ -298,7 +347,10 @@ async function sendDigestEmail(user, digestContent) {
   const fromEmail = (process.env.FROM_EMAIL || "Signal <onboarding@resend.dev>").trim();
   if (!apiKey) throw new Error("RESEND_API_KEY not set");
 
-  const firstName = user.name ? user.name.split(" ")[0] : "there";
+  let firstName = (user.name || "").split(" ")[0] || "there";
+  if (firstName.toLowerCase() === "sh" || firstName.toLowerCase() === "sh.") {
+    firstName = "there";
+  }
   const date = new Date().toLocaleDateString("en-US", {
     weekday: "long", month: "long", day: "numeric",
   });
@@ -322,7 +374,7 @@ async function sendDigestEmail(user, digestContent) {
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Your Signal digest — ${date}</title>
+<title>Your digest — ${date}</title>
 </head>
 <body style="margin:0;padding:0;background:#FAFAF8;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#1A1A18;">
 <div style="padding:24px 16px;">
@@ -336,8 +388,8 @@ async function sendDigestEmail(user, digestContent) {
       ${bodyHtml}
     </div>
     <div style="padding:18px 28px;text-align:center;font-size:12px;color:#9E9E96;border-top:1px solid #E8E6E0;">
-      <p>You're receiving this because you subscribed to Signal.</p>
-      <p style="margin-top:6px;"><a href="#" style="color:#9E9E96;text-decoration:none;">Unsubscribe</a> · <a href="#" style="color:#9E9E96;text-decoration:none;">Update preferences</a></p>
+      <p>You're receiving this because you subscribed to Sharflow. To unsubscribe visit sharflow.com/unsubscribe</p>
+      <p style="margin-top:6px;"><a href="https://sharflow.com/unsubscribe" style="color:#9E9E96;text-decoration:none;">Unsubscribe</a> · <a href="#" style="color:#9E9E96;text-decoration:none;">Update preferences</a></p>
     </div>
   </div>
 </div>
@@ -354,8 +406,11 @@ async function sendDigestEmail(user, digestContent) {
       body: JSON.stringify({
         from: fromEmail,
         to: [user.email],
-        subject: `Your Signal digest — ${date}`,
+        subject: `Your digest — ${date}`,
         html,
+        headers: {
+          "List-Unsubscribe": "<https://sharflow.com/unsubscribe>"
+        }
       }),
     }),
     TIMEOUT_MS
@@ -436,6 +491,7 @@ async function handler(req, res) {
 
       try {
         if (!user.email || !user.profile?.summary) {
+          console.log(`[${new Date().toISOString()}] [CRON] Skipping user ${user.email || "unknown"} — email or starting profile summary is missing.`);
           results.skipped++;
           continue;
         }
@@ -463,7 +519,7 @@ async function handler(req, res) {
           });
           userHour = parseInt(localHourStr, 10);
         } catch (tzErr) {
-          console.warn(`Invalid timezone [${userTz}] for user ${user.email}, falling back to UTC`, tzErr.message);
+          console.warn(`[${new Date().toISOString()}] Invalid timezone [${userTz}] for user ${user.email}, falling back to UTC`, tzErr.message);
           userTz = "UTC";
           userTimeStr = now.toLocaleTimeString("en-US", {
             timeZone: "UTC",
@@ -484,13 +540,14 @@ async function handler(req, res) {
 
         // 1. Check if the current user-local hour is the targeted delivery hour
         if (userHour !== targetHour) {
+          console.log(`[${new Date().toISOString()}] [CRON] Skipping ${user.email} — current local hour ${userHour} does not match target hour ${targetHour}.`);
           results.skipped++;
           continue;
         }
 
         // 2. Prevent duplicate sends within the same user-local day
         if (user.lastDigestSentDate === userLocalDateStr) {
-          console.log(`[CRON] ${user.email} already received their digest for ${userLocalDateStr} today. Skipping to prevent duplicate.`);
+          console.log(`[${new Date().toISOString()}] [CRON] Skipping ${user.email} — already received their digest for ${userLocalDateStr} today.`);
           results.skipped++;
           continue;
         }
@@ -501,7 +558,7 @@ async function handler(req, res) {
           date: userLocalDateStr
         });
         if (existingDigest) {
-          console.log(`[CRON] ${user.email} secondary duplicate prevent check matched in digests collection for ${userLocalDateStr}`);
+          console.log(`[${new Date().toISOString()}] [CRON] Skipping ${user.email} — duplicate check matched in db digests collection for ${userLocalDateStr}.`);
           await db.collection("users").updateOne(
             { _id: user._id },
             { $set: { lastDigestSentDate: userLocalDateStr } }
@@ -517,11 +574,12 @@ async function handler(req, res) {
 
         // Fetch news matching preferences
         const news = await fetchNews(topics, prof, avoid);
-        console.log(`[CRON] ${user.email} — fetched ${news.articles.length} news articles`);
+        console.log(`[${new Date().toISOString()}] [CRON] ${user.email} — fetched ${news.articles.length} news articles`);
 
         // Generate personalized digest via AI
         const digestContent = await generateDigest(user, news);
         if (!digestContent) { 
+          console.log(`[${new Date().toISOString()}] [CRON] Skipping ${user.email} — generated digest content is empty.`);
           results.skipped++; 
           await logDelivery(db, user, "skipped", "Empty digest content generated", userLocalDateStr, userTimeStr);
           continue; 
@@ -529,7 +587,7 @@ async function handler(req, res) {
 
         // Send beautiful HTML email via Resend
         const emailId = await sendDigestEmail(user, digestContent);
-        console.log(`[CRON] ${user.email} — email sent successfully: ${emailId}`);
+        console.log(`[${new Date().toISOString()}] [CRON] ${user.email} — email sent successfully: ${emailId}`);
 
         // Save complete historical record inside the digests collection
         await saveDigest(db, user._id, user.email, digestContent, userLocalDateStr);
@@ -549,13 +607,13 @@ async function handler(req, res) {
         await sleep(500);
 
       } catch (userErr) {
-        console.error(`[CRON] Failed for ${user.email}:`, userErr.message);
+        console.error(`[${new Date().toISOString()}] [CRON] Failed for ${user.email}:`, userErr.message);
         results.failed++;
         results.errors.push({ email: user.email, error: userErr.message });
         try {
           await logDelivery(db, user, "failed", userErr.message, userLocalDateStr, userTimeStr);
         } catch (logErr) {
-          console.error(`Status log write failed for ${user.email}:`, logErr.message);
+          console.error(`[${new Date().toISOString()}] Status log write failed for ${user.email}:`, logErr.message);
         }
       }
     }
