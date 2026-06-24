@@ -101,34 +101,65 @@ function getUTCHourForLocalTime(digestTime, timezone) {
 }
 
 // ── FETCH NEWS (inline — avoids internal HTTP call) ───────────────────────────
-async function fetchNews(topics, profession, avoid) {
+async function fetchNews(topics, profession, avoid, lastDigest = null) {
   const tavilyKey  = (process.env.TAVILY_API_KEY  || "").trim();
   const youtubeKey = (process.env.YOUTUBE_API_KEY || "").trim();
 
+  // FIX 3: SMARTER TIME WINDOW
+  let startTimeWindow;
+  if (lastDigest && lastDigest.sentAt) {
+    startTimeWindow = new Date(lastDigest.sentAt);
+  } else {
+    startTimeWindow = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  }
+  const publishedAfterStr = startTimeWindow.toISOString();
+
+  // FIX 2: PREVENT DUPLICATE STORIES — Extract already sent URLs from last digest
+  const sentUrls = new Set();
+  if (lastDigest && lastDigest.content) {
+    const urlRegex = /https?:\/\/[^\s>"\)\*,;]+/g;
+    let m;
+    while ((m = urlRegex.exec(lastDigest.content)) !== null) {
+      let cleanedUrl = m[0].trim().replace(/[\.,\);]+$/, "");
+      sentUrls.add(cleanedUrl.toLowerCase());
+    }
+  }
+
   // --- Tavily ---
   async function tavily() {
-    if (!tavilyKey) return [];
+    const queryStr = `Latest news: ${topics || "technology AI business"}`;
+    console.log(`[${new Date().toISOString()}] [CRON] [Tavily Debug] API key length: ${tavilyKey.length}, present: ${!!tavilyKey}`);
+    console.log(`[${new Date().toISOString()}] [CRON] [Tavily Debug] Query string: "${queryStr}"`);
+    if (!tavilyKey) {
+      console.log(`[${new Date().toISOString()}] [CRON] [Tavily Debug] Skipping Tavily fetch because API key is missing.`);
+      return [];
+    }
     try {
       const res = await withTimeout(fetch(TAVILY_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           api_key: tavilyKey,
-          query: `Latest news: ${topics || "technology AI business"}`,
+          query: queryStr,
           search_depth: "advanced",
           include_answer: false,
           include_raw_content: false,
-          max_results: 6,
+          max_results: 10,
           exclude_domains: avoid
             ? avoid.split(",").map(s => s.trim()).filter(Boolean)
             : [],
+          publishedAfter: publishedAfterStr // FIX 3: SMARTER TIME WINDOW
         }),
       }), TIMEOUT_MS);
+      
+      console.log(`[${new Date().toISOString()}] [CRON] [Tavily Debug] Response status: ${res.status} (${res.statusText})`);
+      
       if (!res.ok) {
         console.log(`[${new Date().toISOString()}] [CRON] Tavily bad response: fallback to RSS + Reddit`);
         return [];
       }
       const data = await res.json();
+      console.log(`[${new Date().toISOString()}] [CRON] [Tavily Debug] Received ${data.results?.length || 0} results from Tavily.`);
       return (data.results || []).map(r => ({
         source: "tavily",
         title: r.title || "",
@@ -156,7 +187,7 @@ async function fetchNews(topics, profession, avoid) {
     }
     try {
       const res = await withTimeout(
-        fetch(`https://www.reddit.com/r/${subreddit}/hot.json?limit=6`, {
+        fetch(`https://www.reddit.com/r/${subreddit}/hot.json?limit=10`, {
           headers: { "User-Agent": "Signal-NewsDigest/1.0" },
         }), TIMEOUT_MS
       );
@@ -164,12 +195,12 @@ async function fetchNews(topics, profession, avoid) {
       const data = await res.json();
       return (data?.data?.children || [])
         .filter(p => !p.data?.stickied && !p.data?.over_18)
-        .slice(0, 3)
+        .slice(0, 5)
         .map(p => ({
           source: "reddit",
           title: p.data?.title || "",
           url: `https://reddit.com${p.data?.permalink || ""}`,
-          snippet: `${p.data?.ups || 0} upvotes · r/${p.data?.subreddit}`,
+          snippet: `${p.data?.ups || 0} upvotes · r/${p.data?.subreddit} · ${p.data?.selftext || ""}`,
         }));
     } catch (err) {
       console.log(`[${new Date().toISOString()}] [CRON] Reddit failed:`, err.message);
@@ -177,7 +208,7 @@ async function fetchNews(topics, profession, avoid) {
     }
   }
 
-  // --- RSS (matches dashboard pipeline) ---
+  // --- RSS ---
   async function rss() {
     const topicsLower = (topics || "").toLowerCase();
     const feedMap = [
@@ -201,7 +232,7 @@ async function fetchNews(topics, profession, avoid) {
       const items = [];
       const itemRegex = /<item>([\s\S]*?)<\/item>/g;
       let match;
-      while ((match = itemRegex.exec(xml)) !== null && items.length < 4) {
+      while ((match = itemRegex.exec(xml)) !== null && items.length < 8) {
         const block = match[1];
         const title = (/<title><!\[CDATA\[(.*?)\]\]><\/title>/.exec(block) || /<title>(.*?)<\/title>/.exec(block) || [])[1] || "";
         const link = (/<link>(.*?)<\/link>/.exec(block) || [])[1] || "";
@@ -224,41 +255,111 @@ async function fetchNews(topics, profession, avoid) {
 
   // --- YouTube ---
   async function youtube() {
-    if (!youtubeKey) return null;
+    if (!youtubeKey) return [];
     const primaryTopic = (topics || "technology").split(",")[0].trim();
     const query = `${primaryTopic} ${profession ? profession.split(" ")[0] : ""} 2025`.trim();
     try {
       const params = new URLSearchParams({
         part: "snippet", q: query, type: "video",
-        order: "relevance", maxResults: "3",
+        order: "relevance", maxResults: "5",
         videoDuration: "medium", relevanceLanguage: "en",
-        publishedAfter: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+        publishedAfter: publishedAfterStr, // FIX 3: SMARTER TIME WINDOW
         key: youtubeKey,
       });
       const res = await withTimeout(fetch(`${YOUTUBE_URL}?${params}`), TIMEOUT_MS);
-      if (!res.ok) return null;
+      if (!res.ok) return [];
       const data = await res.json();
-      const item = (data.items || []).find(i => i.snippet?.title?.length > 10);
-      if (!item) return null;
-      return {
-        title: item.snippet.title,
-        channel: item.snippet.channelTitle,
-        url: `https://youtube.com/watch?v=${item.id.videoId}`,
-      };
+      return (data.items || [])
+        .filter(i => i.snippet?.title?.length > 10)
+        .map(item => ({
+          source: "youtube",
+          title: item.snippet.title,
+          url: `https://youtube.com/watch?v=${item.id.videoId}`,
+          snippet: `Video on YouTube: ${item.snippet.channelTitle} · ${item.snippet.description || ""}`,
+        }));
     } catch (err) {
       console.log(`[${new Date().toISOString()}] [CRON] YouTube failed:`, err.message);
-      return null;
+      return [];
     }
   }
 
-  const [tavilyArticles, rssItems, redditPosts, video] = await Promise.all([
+  const [tavilyArticles, rssItems, redditPosts, youtubeVideos] = await Promise.all([
     tavily(), rss(), reddit(), youtube(),
   ]);
 
+  // Combine into one single pool
+  let candidatePool = [
+    ...(tavilyArticles || []),
+    ...(rssItems || []),
+    ...(redditPosts || []),
+    ...(youtubeVideos || []),
+  ];
+
+  console.log(`[CRON] Total candidate pool size before filtering: ${candidatePool.length} articles/posts`);
+
+  // FIX 2: PREVENT DUPLICATE STORIES — Filter candidatePool against sentUrls
+  candidatePool = candidatePool.filter(art => {
+    if (!art.url) return true;
+    const urlLower = art.url.trim().toLowerCase();
+    for (const sentUrl of sentUrls) {
+      if (urlLower.includes(sentUrl) || sentUrl.includes(urlLower)) {
+        console.log(`[CRON] Filtering out duplicate story URL: ${art.url}`);
+        return false;
+      }
+    }
+    return true;
+  });
+
+  console.log(`[CRON] Candidate pool size after duplicate filtering: ${candidatePool.length}`);
+
+  // FIX 1: REMOVE FORCED SOURCE DIVERSITY — Rank candidates by relevance to topics and profession
+  const topicKeywords = (topics || "")
+    .toLowerCase()
+    .split(/[\s,]+/)
+    .map(k => k.trim())
+    .filter(k => k.length > 2);
+  
+  const profKeywords = (profession || "")
+    .toLowerCase()
+    .split(/[\s,]+/)
+    .map(k => k.trim())
+    .filter(k => k.length > 2);
+
+  const rankedCandidates = candidatePool.map(art => {
+    let score = 0;
+    const titleLower = (art.title || "").toLowerCase();
+    const snippetLower = (art.snippet || "").toLowerCase();
+
+    // Match keywords
+    topicKeywords.forEach(kw => {
+      if (titleLower.includes(kw)) score += 15;
+      if (snippetLower.includes(kw)) score += 5;
+    });
+
+    profKeywords.forEach(kw => {
+      if (titleLower.includes(kw)) score += 10;
+      if (snippetLower.includes(kw)) score += 3;
+    });
+
+    // Give a slight boost to high-conviction sources like Tavily and YouTube
+    if (art.source === "tavily") score += 2;
+    if (art.source === "youtube") score += 1;
+
+    return { ...art, score };
+  });
+
+  // Sort descending by score
+  rankedCandidates.sort((a, b) => b.score - a.score);
+
+  // Take top 5-6 articles (take top 6)
+  const finalArticles = rankedCandidates.slice(0, 6);
+
+  console.log(`[CRON] Selected top 6 articles based on relevance:`, finalArticles.map(a => `[Score: ${a.score}, Source: ${a.source}] ${a.title}`));
+
   return {
-    articles: [...tavilyArticles, ...rssItems].slice(0, 8),
-    reddit: redditPosts,
-    video,
+    articles: finalArticles,
+    reddit: [],
+    video: null,
   };
 }
 
@@ -333,13 +434,19 @@ YOUR SIGNAL · ${today}
 ③ [Story headline — only if strongly relevant]
 [Synthesized Intelligence Paragraph: Exactly 2 sentences maximum. Sentence 1: what happened. Sentence 2: what changes next/opportunity. No labels or procedural tags.]
 → [source URL]
-${user.plan === "pro" ? `
-📺 VIDEO WORTH YOUR TIME
-[Synthesized relevance & target takeaway — exactly 2 sentences, no headers or labels.]
-→ [URL]
-` : ""}
-💡 ONE THING TO DO TODAY
-[Actionable intelligence — what move should the user execute today based on these signals? Not generic advice.]
+
+④ [Story headline — only if strongly relevant]
+[Synthesized Intelligence Paragraph: Exactly 2 sentences maximum. Sentence 1: what happened. Sentence 2: what changes next/opportunity. No labels or procedural tags.]
+→ [source URL]
+
+⑤ [Story headline — only if strongly relevant]
+[Synthesized Intelligence Paragraph: Exactly 2 sentences maximum. Sentence 1: what happened. Sentence 2: what changes next/opportunity. No labels or procedural tags.]
+→ [source URL]
+
+📊 THIS WEEK
+• [Trend Observation 1: A sharp, specific observation of a current shift, trend, or development. Absolutely NO advice, NO action steps, NO recommendations. Plain observation only, exactly 1-2 sentences.]
+• [Trend Observation 2: Another sharp trend observation, absolutely no advice or actions, exactly 1-2 sentences.]
+• [Trend Observation 3 — optional: A third trend observation, absolutely no advice or actions, exactly 1-2 sentences.]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -366,7 +473,7 @@ STRICT WRITING DIRECTIVES:
       model: "gemini-3.5-flash",
       contents: prompt,
       config: {
-        systemInstruction: "You are Signal — a personal intelligence system. Filter noise into insights for one person. Never hallucinate. Explain WHY. Give actionable implications.",
+        systemInstruction: "You are Signal — a personal intelligence system. Filter noise into insights for one person. Never hallucinate. You will be penalized for writing more than 2 sentences per story. Count your sentences. Stop at 2. Explain WHY. Give actionable implications.",
         temperature: 0.3,
       }
     });
@@ -384,7 +491,7 @@ STRICT WRITING DIRECTIVES:
           model: MODEL,
           max_tokens: 1400,
           messages: [
-            { role: "system", content: "You are Signal — a personal intelligence system. Filter noise into insights for one person. Never hallucinate. Explain WHY. Give actionable implications." },
+            { role: "system", content: "You are Signal — a personal intelligence system. Filter noise into insights for one person. Never hallucinate. You will be penalized for writing more than 2 sentences per story. Count your sentences. Stop at 2. Explain WHY. Give actionable implications." },
             { role: "user", content: prompt },
           ],
         }),
@@ -422,7 +529,7 @@ async function sendDigestEmail(user, digestContent) {
     .replace(/━+/g, '<hr style="border:none;border-top:1px solid #E8E6E0;margin:18px 0;"/>')
     .replace(/^(🔥|💡|📊|📺|💬)[^\n]+$/gm, m =>
       `<p style="font-size:12px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#16A34A;margin:20px 0 8px;">${m}</p>`)
-    .replace(/^(①|②|③|④|⑤)/gm, m =>
+    .replace(/^(①|②|③|④|⑤|⑥)/gm, m =>
       `<span style="color:#1B4FD8;font-weight:700;">${m}</span>`)
     .replace(/^→ .+$/gm, m =>
       `<span style="font-size:12px;color:#1B4FD8;">${m}</span>`)
@@ -635,8 +742,13 @@ async function handler(req, res) {
         const prof    = profile.profession || "";
         const avoid   = profile.avoid      || "";
 
+        // Read the last digest record for this user from the "digests" collection
+        const userDigests = await db.collection("digests").find({ email: user.email }).toArray();
+        const sortedDigests = userDigests.sort((a, b) => new Date(b.sentAt) - new Date(a.sentAt));
+        const lastDigest = sortedDigests[0] || null;
+
         // Fetch news matching preferences
-        const news = await fetchNews(topics, prof, avoid);
+        const news = await fetchNews(topics, prof, avoid, lastDigest);
         console.log(`[${new Date().toISOString()}] [CRON] ${user.email} — fetched ${news.articles.length} news articles`);
 
         // Generate personalized digest via AI
