@@ -246,7 +246,7 @@ Preferred content style: [Tone, size, or specificity preference, e.g. 'Actionabl
 
       if (aiClient) {
         const response = await aiClient.models.generateContent({
-          model: "gemini-2.0-flash",
+          model: "gemini-3.5-flash",
           contents: userPrompt,
           config: {
             systemInstruction: "You write tight, accurate user profiles for a personalized digest product. Use only facts from the form and chat. Be specific, not generic.",
@@ -332,7 +332,7 @@ Preferred content style: [Tone, size, or specificity preference, e.g. 'Actionabl
 
       if (aiClient) {
         const response = await aiClient.models.generateContent({
-          model: "gemini-2.0-flash",
+          model: "gemini-3.5-flash",
           contents: prompt,
           config: {
             systemInstruction: "You are Signal — a personal intelligence system. You filter global noise into insights for one specific person. You never hallucinate. You explain WHY each item matters to them. You give actionable implications, not summaries.",
