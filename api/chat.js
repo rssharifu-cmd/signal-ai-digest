@@ -182,12 +182,11 @@ async function handler(req, res) {
 
       let content = "";
 
-      // CHAT: Always use Groq
       if (!apiGrokKey) {
         return res.status(400).json({ error: "GROK_API_KEY not configured" });
       }
       const grokRes = await grokFetch(apiGrokKey, {
-        model: MODEL,
+        model: "llama-3.3-70b-versatile",
         max_tokens: 600,
         messages: [{ role: "system", content: system }, ...conv],
       });
