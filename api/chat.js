@@ -182,41 +182,21 @@ async function handler(req, res) {
 
       let content = "";
 
-      if (aiClient) {
-        const contents = conv.map(m => ({
-          role: m.role === "assistant" ? "model" : m.role,
-          parts: [{ text: m.content || "" }]
-        }));
-
-        const response = await aiClient.models.generateContent({
-          model: "gemini-3.5-flash",
-          contents: contents,
-          config: {
-            systemInstruction: system,
-            temperature: 0.7,
-          }
-        });
-        content = response.text || "";
-      } else {
-        if (!apiGrokKey) {
-          return res.status(400).json({
-            error: "Missing API key. Provide GEMINI_API_KEY or GROK_API_KEY.",
-          });
-        }
-        const grokRes = await grokFetch(apiGrokKey, {
-          model: MODEL,
-          max_tokens: 600,
-          messages: [{ role: "system", content: system }, ...conv],
-        });
-
-        if (!grokRes.ok) {
-          const err = await grokRes.json().catch(() => ({}));
-          return res.status(grokRes.status).json({ error: err.error?.message || "Groq API error" });
-        }
-
-        const data = await grokRes.json();
-        content = data.choices?.[0]?.message?.content ?? "";
+      // CHAT: Always use Groq
+      if (!apiGrokKey) {
+        return res.status(400).json({ error: "GROK_API_KEY not configured" });
       }
+      const grokRes = await grokFetch(apiGrokKey, {
+        model: MODEL,
+        max_tokens: 600,
+        messages: [{ role: "system", content: system }, ...conv],
+      });
+      if (!grokRes.ok) {
+        const err = await grokRes.json().catch(() => ({}));
+        return res.status(grokRes.status).json({ error: err.error?.message || "Groq API error" });
+      }
+      const data = await grokRes.json();
+      content = data.choices?.[0]?.message?.content ?? "";
 
       // Detect if AI is signalling wrap-up
       const wrapKeywords = ["ready to draft", "ready to generate", "have everything", "build your profile", "draft your profile"];
@@ -267,7 +247,7 @@ Preferred content style: [Tone, size, or specificity preference, e.g. 'Actionabl
 
       if (aiClient) {
         const response = await aiClient.models.generateContent({
-          model: "gemini-3.5-flash",
+          model: "gemini-2.0-flash",
           contents: userPrompt,
           config: {
             systemInstruction: "You write tight, accurate user profiles for a personalized digest product. Use only facts from the form and chat. Be specific, not generic.",
@@ -353,7 +333,7 @@ Preferred content style: [Tone, size, or specificity preference, e.g. 'Actionabl
 
       if (aiClient) {
         const response = await aiClient.models.generateContent({
-          model: "gemini-3.5-flash",
+          model: "gemini-2.0-flash",
           contents: prompt,
           config: {
             systemInstruction: "You are Signal — a personal intelligence system. You filter global noise into insights for one specific person. You never hallucinate. You explain WHY each item matters to them. You give actionable implications, not summaries.",
