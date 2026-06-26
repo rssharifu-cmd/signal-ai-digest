@@ -283,8 +283,55 @@ async function fetchNews(topics, profession, avoid, lastDigest = null) {
     }
   }
 
-  const [tavilyArticles, rssItems, redditPosts, youtubeVideos] = await Promise.all([
-    tavily(), rss(), reddit(), youtube(),
+  // --- Google Trends ---
+  async function googleTrends() {
+    try {
+      const primaryTopic = (topics || "technology").split(",")[0].trim();
+      const encodedTopic = encodeURIComponent(primaryTopic);
+      const res = await withTimeout(
+        fetch(`https://trends.google.com/trends/api/dailytrends?hl=en-US&tz=-300&geo=US&ns=15`, {
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+        }), TIMEOUT_MS
+      );
+      if (!res.ok) return [];
+      const text = await res.text();
+      const json = JSON.parse(text.slice(5));
+      const trends = json?.default?.trendingSearchesDays?.[0]?.trendingSearches || [];
+      
+      const topicKeywordsLower = (topics || "").toLowerCase().split(/[\s,]+/).filter(k => k.length > 2);
+      
+      const results = [];
+      for (const trend of trends.slice(0, 20)) {
+        const title = trend.title?.query || "";
+        const titleLower = title.toLowerCase();
+        const articles = trend.articles || [];
+        const firstArticle = articles[0];
+        
+        // Only include if relevant to user topics
+        const isRelevant = topicKeywordsLower.some(kw => titleLower.includes(kw)) ||
+          (firstArticle && topicKeywordsLower.some(kw => 
+            (firstArticle.title || "").toLowerCase().includes(kw)
+          ));
+        
+        if (isRelevant && firstArticle) {
+          results.push({
+            source: "google_trends",
+            title: `🔎 Trending: ${title} — ${firstArticle.title || ""}`,
+            url: firstArticle.url || `https://trends.google.com/trends/explore?q=${encodedTopic}&geo=US`,
+            snippet: `Currently trending in the US with ${trend.formattedTraffic || "high"} searches. ${firstArticle.snippet || ""}`,
+          });
+        }
+      }
+      console.log(`[CRON] Google Trends returned ${results.length} relevant results`);
+      return results;
+    } catch (err) {
+      console.log(`[CRON] Google Trends failed:`, err.message);
+      return [];
+    }
+  }
+
+  const [tavilyArticles, rssItems, redditPosts, youtubeVideos, trendingTopics] = await Promise.all([
+    tavily(), rss(), reddit(), youtube(), googleTrends(),
   ]);
 
   // Combine into one single pool
@@ -293,6 +340,7 @@ async function fetchNews(topics, profession, avoid, lastDigest = null) {
     ...(rssItems || []),
     ...(redditPosts || []),
     ...(youtubeVideos || []),
+    ...(trendingTopics || []),
   ];
 
   console.log(`[CRON] Total candidate pool size before filtering: ${candidatePool.length} articles/posts`);
@@ -342,8 +390,9 @@ async function fetchNews(topics, profession, avoid, lastDigest = null) {
     });
 
     // Give a slight boost to high-conviction sources like Tavily and YouTube
-    if (art.source === "tavily") score += 2;
-    if (art.source === "youtube") score += 1;
+    if (art.source === "tavily")        score += 2;
+    if (art.source === "youtube")       score += 1;
+    if (art.source === "google_trends") score += 3;
 
     return { ...art, score };
   });
