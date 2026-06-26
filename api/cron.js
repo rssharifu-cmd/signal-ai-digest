@@ -400,9 +400,7 @@ async function handler(req, res) {
           userLocalDateStr = now.toLocaleDateString("en-US",  { timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit" });
         }
 
-        const targetUTCHour  = getUTCHourForLocalTime(digestTimePreference, userTz);
-        const currentUTCHour = now.getUTCHours();
-        if (currentUTCHour !== targetUTCHour) { results.skipped++; continue; }
+
 
         // Atomic lock — prevent duplicate sends
         const lockResult = await db.collection("digests").updateOne(
