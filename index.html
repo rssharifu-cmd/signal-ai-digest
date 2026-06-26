@@ -63,11 +63,11 @@
         </div>
         <div class="feature-card">
           <h3>Professional dashboard</h3>
-          <p>Generate today's edition on demand, review your locked profile, and email yourself the brief.</p>
+          <p>View your latest digest, review your profile, and track what Signal is learning about you.</p>
         </div>
         <div class="feature-card">
-          <h3>7-day profile lock</h3>
-          <p>Your preferences stay stable while Signal tunes relevance — then you can refine again.</p>
+          <h3>Always improving</h3>
+          <p>Reset your profile anytime. Signal learns what matters to you with every digest.</p>
         </div>
       </div>
     </div>
@@ -145,7 +145,6 @@
       <button class="dash-nav-item active" data-panel="overview" onclick="dashNav('overview')">Overview</button>
       <button class="dash-nav-item" data-panel="digest" onclick="dashNav('digest')">Today's digest</button>
       <button class="dash-nav-item" data-panel="profile" onclick="dashNav('profile')">Profile</button>
-      <button class="dash-nav-item" data-panel="settings" onclick="dashNav('settings')">Settings</button>
     </aside>
 
     <main class="dash-main">
@@ -153,20 +152,12 @@
       <div class="dash-panel" id="panel-overview">
         <div class="dash-header">
           <h1 id="dash-greeting">Good afternoon</h1>
-          <p>Your live digest pulls from Tavily, RSS, Reddit, and YouTube — filtered to your profile.</p>
-          <div class="dash-meta">
-            <span class="meta-pill green">Profile locked</span>
-            <span class="meta-pill amber">Unlocks in <span id="lock-countdown">—</span></span>
-          </div>
+          <p>Your daily intelligence brief arrives every morning. Next edition coming tomorrow.</p>
         </div>
         <div class="dash-grid">
           <div class="dash-card span-2">
             <div class="dash-card-head">
               <h3>Latest digest</h3>
-              <div class="digest-actions">
-                <button class="btn btn-primary btn-sm" id="btn-generate-digest" onclick="generateDashboardDigest()">Generate today</button>
-                <button class="btn btn-secondary btn-sm" onclick="sendDigestEmail()">Email me</button>
-              </div>
             </div>
             <div class="digest-panel">
               <div id="digest-output" class="digest-content empty">Loading…</div>
@@ -196,10 +187,6 @@
           <p>Regenerate anytime — each run uses fresh live sources.</p>
         </div>
         <div class="dash-card">
-          <div class="digest-actions" style="margin-bottom:16px;">
-            <button class="btn btn-primary" onclick="generateDashboardDigest()">Generate today</button>
-            <button class="btn btn-secondary" onclick="sendDigestEmail()">Email to inbox</button>
-          </div>
           <div id="digest-output-full" class="digest-content empty">Use Generate to load your brief.</div>
           <p class="source-badge" id="digest-source-note-full"></p>
         </div>
@@ -209,7 +196,7 @@
       <div class="dash-panel hidden" id="panel-profile">
         <div class="dash-header">
           <h1>Your digest profile</h1>
-          <p>Locked for 7 days after confirmation so relevance can stabilize.</p>
+          <p>Your intelligence profile. Reset anytime to start fresh.</p>
         </div>
         <div class="dash-card">
           <div class="profile-row"><span class="label">Role</span><span id="dp-profession-2">—</span></div>
@@ -221,133 +208,6 @@
           <div class="profile-row"><span class="label">Length</span><span id="dp-length-2">—</span></div>
           <div class="profile-row"><span class="label">Sources</span><span id="dp-sources">—</span></div>
           <div class="profile-row"><span class="label">Avoid</span><span id="dp-avoid-2">—</span></div>
-        </div>
-      </div>
-
-      <!-- Settings panel -->
-      <div class="dash-panel hidden" id="panel-settings">
-        <div class="dash-header">
-          <h1>Settings</h1>
-          <p>Update your delivery notifications, geographic scope, and summarization preferences.</p>
-        </div>
-        <div class="dash-grid">
-          <div class="dash-card span-2">
-            <div class="dash-card-head">
-              <h3>Delivery & Localization</h3>
-            </div>
-            
-            <div class="form-row" style="margin-bottom: 16px;">
-              <div class="form-group">
-                <label for="settings-digest-time">Digest Time</label>
-                <select id="settings-digest-time">
-                  <option value="05:00">05:00 AM</option>
-                  <option value="06:00">06:00 AM</option>
-                  <option value="07:00">07:00 AM</option>
-                  <option value="08:00">08:00 AM</option>
-                  <option value="09:00">09:00 AM</option>
-                  <option value="10:00">10:00 AM</option>
-                  <option value="12:00">12:00 PM</option>
-                  <option value="18:00">06:00 PM</option>
-                  <option value="20:00">08:00 PM</option>
-                </select>
-              </div>
-              <div class="form-group">
-                <label for="settings-timezone">Timezone</label>
-                <select id="settings-timezone">
-                  <option value="UTC">UTC (GMT+0)</option>
-                  <option value="America/New_York">New York (EST/EDT, GMT-5)</option>
-                  <option value="America/Chicago">Chicago (CST/CDT, GMT-6)</option>
-                  <option value="America/Denver">Denver (MST/MDT, GMT-7)</option>
-                  <option value="America/Los_Angeles">Los Angeles (PST/PDT, GMT-8)</option>
-                  <option value="Europe/London">London (GMT/BST, GMT+0)</option>
-                  <option value="Europe/Paris">Paris / Central Europe (CET/CEST, GMT+1)</option>
-                  <option value="Asia/Riyadh">Riyadh (AST, GMT+3)</option>
-                  <option value="Asia/Dubai">Dubai (GST, GMT+4)</option>
-                  <option value="Asia/Kolkata">Kolkata / India (IST, GMT+5:30)</option>
-                  <option value="Asia/Singapore">Singapore (SGT, GMT+8)</option>
-                  <option value="Asia/Tokyo">Tokyo (JST, GMT+9)</option>
-                  <option value="Australia/Sydney">Sydney (AEST/AEDT, GMT+10)</option>
-                </select>
-              </div>
-            </div>
-
-            <div class="form-row" style="margin-bottom: 16px;">
-              <div class="form-group">
-                <label for="settings-language">Language</label>
-                <select id="settings-language">
-                  <option value="English">English</option>
-                  <option value="Arabic">Arabic</option>
-                  <option value="Spanish">Spanish</option>
-                  <option value="French">French</option>
-                  <option value="German">German</option>
-                  <option value="Portuguese">Portuguese</option>
-                  <option value="Hindi">Hindi</option>
-                  <option value="Turkish">Turkish</option>
-                  <option value="Indonesian">Indonesian</option>
-                  <option value="Japanese">Japanese</option>
-                  <option value="Korean">Korean</option>
-                  <option value="Chinese">Chinese</option>
-                  <option value="Other">Other</option>
-                </select>
-              </div>
-              <div class="form-group">
-                <label for="settings-country">Region / Country</label>
-                <select id="settings-country">
-                  <option value="United States">United States</option>
-                  <option value="United Kingdom">United Kingdom</option>
-                  <option value="Canada">Canada</option>
-                  <option value="Australia">Australia</option>
-                  <option value="Germany">Germany</option>
-                  <option value="France">France</option>
-                  <option value="Spain">Spain</option>
-                  <option value="Italy">Italy</option>
-                  <option value="Netherlands">Netherlands</option>
-                  <option value="Singapore">Singapore</option>
-                  <option value="India">India</option>
-                  <option value="Saudi Arabia">Saudi Arabia</option>
-                  <option value="UAE">UAE</option>
-                  <option value="Brazil">Brazil</option>
-                  <option value="Japan">Japan</option>
-                  <option value="South Korea">South Korea</option>
-                  <option value="Other">Other</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <div class="dash-card span-2">
-            <div class="dash-card-head">
-              <h3>Content Preferences</h3>
-            </div>
-            <div class="form-row" style="margin-bottom: 16px;">
-              <div class="form-group">
-                <label for="settings-news-scope">News Scope</label>
-                <select id="settings-news-scope">
-                  <option value="Local only">Local only</option>
-                  <option value="Regional">Regional</option>
-                  <option value="International">International</option>
-                  <option value="Mixed">Mixed</option>
-                </select>
-              </div>
-              <div class="form-group">
-                <label for="settings-digest-length">Digest Length</label>
-                <select id="settings-digest-length">
-                  <option value="Quick">Quick (Concise summaries)</option>
-                  <option value="Standard">Standard (Balanced overview)</option>
-                  <option value="Deep">Deep (In-depth analysis)</option>
-                </select>
-              </div>
-            </div>
-            <div class="form-group" style="margin-bottom: 4px;">
-              <label for="settings-avoid">Topics to avoid</label>
-              <input type="text" id="settings-avoid" placeholder="e.g. celebrity news, politics, sports" />
-              <div class="field-hint">Comma-separated interests you would like to exclude from automated Tavily and feed searches.</div>
-            </div>
-          </div>
-
-          <div class="dash-card span-2" style="background: transparent; border: none; box-shadow: none; padding: 0; display: flex; justify-content: flex-end;">
-            <button class="btn btn-primary" id="btn-save-settings" onclick="saveDashboardSettings()">Save Changes</button>
-          </div>
         </div>
       </div>
     </main>

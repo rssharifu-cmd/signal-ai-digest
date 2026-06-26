@@ -1,26 +1,35 @@
 /**
  * Vercel Node.js Serverless — GET /api/cron
  *
- * Triggered daily at 1:00 PM UTC by Vercel Cron.
- * Reads pre-researched articles from MongoDB "research_cache"
- * (populated 30 min earlier by /api/cron-research).
- * Falls back to live fetch if cache is missing.
+ * Triggered daily at 8:00 AM UTC by Vercel Cron.
+ * Orchestrates the full digest pipeline for every active user:
+ *
+ *   MongoDB → get all users
+ *   For each user:
+ *     → /api/news  — fetch Tavily + RSS + Reddit + YouTube
+ *     → Groq       — summarize + personalize into digest
+ *     → /api/send  — send beautiful HTML email
+ *     → MongoDB    — save digest record
  *
  * Required env vars:
- *   MONGODB_URI, GEMINI_API_KEY, GROK_API_KEY,
- *   RESEND_API_KEY, FROM_EMAIL, TAVILY_API_KEY, YOUTUBE_API_KEY
+ *   MONGODB_URI, GROK_API_KEY, RESEND_API_KEY,
+ *   FROM_EMAIL, TAVILY_API_KEY, YOUTUBE_API_KEY
+ *
+ * Security: CRON_SECRET header must match env var
+ * (Vercel sets Authorization: Bearer <CRON_SECRET> automatically)
  */
 
 const { getDb } = require("./db");
-const { formatMemoryForPrompt, ensureMemory } = require("./memory");
+const { formatMemoryForPrompt, buildDigestPrompt, ensureMemory } = require("./memory");
 
-const GROK_URL    = "https://api.groq.com/openai/v1/chat/completions";
-const RESEND_URL  = "https://api.resend.com/emails";
-const TAVILY_URL  = "https://api.tavily.com/search";
-const YOUTUBE_URL = "https://www.googleapis.com/youtube/v3/search";
-const MODEL       = "llama-3.3-70b-versatile";
-const TIMEOUT_MS  = 30000;
+const GROK_URL      = "https://api.groq.com/openai/v1/chat/completions";
+const RESEND_URL    = "https://api.resend.com/emails";
+const TAVILY_URL    = "https://api.tavily.com/search";
+const YOUTUBE_URL   = "https://www.googleapis.com/youtube/v3/search";
+const MODEL         = "llama-3.3-70b-versatile";
+const TIMEOUT_MS    = 30000;
 
+// ── HELPERS ───────────────────────────────────────────────────────────────────
 function withTimeout(promise, ms) {
   return Promise.race([
     promise,
@@ -34,47 +43,69 @@ function getUTCHourForLocalTime(digestTime, timezone) {
   let [localHourStr] = (digestTime || "08:00").split(":");
   let targetHour = parseInt(localHourStr, 10);
   if (isNaN(targetHour)) targetHour = 8;
+
   const now = new Date();
   try {
-    const formatter    = new Intl.DateTimeFormat("en-US", { timeZone: timezone || "UTC", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
-    const formatterUTC = new Intl.DateTimeFormat("en-US", { timeZone: "UTC",             year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
-    const parts    = formatter.formatToParts(now);
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone || "UTC",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    });
+    const formatterUTC = new Intl.DateTimeFormat("en-US", {
+      timeZone: "UTC",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    });
+
+    const parts = formatter.formatToParts(now);
     const utcParts = formatterUTC.formatToParts(now);
-    const getVal   = (pList, type) => parseInt(pList.find(p => p.type === type).value, 10);
-    const localDate = Date.UTC(getVal(parts, "year"), getVal(parts, "month") - 1, getVal(parts, "day"), getVal(parts, "hour"), getVal(parts, "minute"), getVal(parts, "second"));
-    const utcDate   = Date.UTC(getVal(utcParts, "year"), getVal(utcParts, "month") - 1, getVal(utcParts, "day"), getVal(utcParts, "hour"), getVal(utcParts, "minute"), getVal(utcParts, "second"));
-    const diffHours = Math.round((localDate - utcDate) / (1000 * 60 * 60));
+
+    const getVal = (pList, type) => parseInt(pList.find(p => p.type === type).value, 10);
+
+    const localDate = Date.UTC(
+      getVal(parts, "year"),
+      getVal(parts, "month") - 1,
+      getVal(parts, "day"),
+      getVal(parts, "hour"),
+      getVal(parts, "minute"),
+      getVal(parts, "second")
+    );
+
+    const utcDate = Date.UTC(
+      getVal(utcParts, "year"),
+      getVal(utcParts, "month") - 1,
+      getVal(utcParts, "day"),
+      getVal(utcParts, "hour"),
+      getVal(utcParts, "minute"),
+      getVal(utcParts, "second")
+    );
+
+    const diffMs = localDate - utcDate;
+    const diffHours = Math.round(diffMs / (1000 * 60 * 60));
+
     return (targetHour - diffHours + 24) % 24;
   } catch (err) {
-    console.error("UTC hour conversion error:", err.message);
+    console.error("Error converting local time to UTC hour: ", err.message);
     return targetHour;
   }
 }
 
-// ── FETCH NEWS — cache-first, live fallback ───────────────────────────────────
-async function fetchNews(db, user, topics, profession, avoid, lastDigest) {
-  const today = new Date().toISOString().split("T")[0];
-
-  // Try research cache first
-  try {
-    const cache = await db.collection("research_cache").findOne({
-      email: user.email,
-      date:  today,
-    });
-    if (cache && cache.articles && cache.articles.length > 0) {
-      console.log(`[CRON] ${user.email} — using research cache (${cache.articles.length} articles)`);
-      return { articles: cache.articles.slice(0, 6) };
-    }
-  } catch (err) {
-    console.log(`[CRON] Cache read failed for ${user.email}: ${err.message}`);
-  }
-
-  // Cache miss — live fallback fetch
-  console.log(`[CRON] ${user.email} — no cache found, running live fetch`);
-
+// ── FETCH NEWS (inline — avoids internal HTTP call) ───────────────────────────
+async function fetchNews(topics, profession, avoid, lastDigest = null) {
   const tavilyKey  = (process.env.TAVILY_API_KEY  || "").trim();
   const youtubeKey = (process.env.YOUTUBE_API_KEY || "").trim();
 
+  // FIX 3: SMARTER TIME WINDOW
   let startTimeWindow;
   if (lastDigest && lastDigest.sentAt) {
     startTimeWindow = new Date(lastDigest.sentAt);
@@ -83,66 +114,119 @@ async function fetchNews(db, user, topics, profession, avoid, lastDigest) {
   }
   const publishedAfterStr = startTimeWindow.toISOString();
 
+  // FIX 2: PREVENT DUPLICATE STORIES — Extract already sent URLs from last digest
   const sentUrls = new Set();
   if (lastDigest && lastDigest.content) {
-    const urlRegex = /https?:\/\/[^\s>")\*,;]+/g;
+    const urlRegex = /https?:\/\/[^\s>"\)\*,;]+/g;
     let m;
     while ((m = urlRegex.exec(lastDigest.content)) !== null) {
-      sentUrls.add(m[0].trim().replace(/[\.,\);]+$/, "").toLowerCase());
+      let cleanedUrl = m[0].trim().replace(/[\.,\);]+$/, "");
+      sentUrls.add(cleanedUrl.toLowerCase());
     }
   }
 
+  // --- Tavily ---
   async function tavily() {
-    if (!tavilyKey) return [];
+    const queryStr = `Latest news: ${topics || "technology AI business"}`;
+    console.log(`[${new Date().toISOString()}] [CRON] [Tavily Debug] API key length: ${tavilyKey.length}, present: ${!!tavilyKey}`);
+    console.log(`[${new Date().toISOString()}] [CRON] [Tavily Debug] Query string: "${queryStr}"`);
+    if (!tavilyKey) {
+      console.log(`[${new Date().toISOString()}] [CRON] [Tavily Debug] Skipping Tavily fetch because API key is missing.`);
+      return [];
+    }
     try {
       const res = await withTimeout(fetch(TAVILY_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           api_key: tavilyKey,
-          query: `Latest news: ${topics || "technology AI business"}`,
+          query: queryStr,
           search_depth: "advanced",
           include_answer: false,
           include_raw_content: false,
           max_results: 10,
-          exclude_domains: avoid ? avoid.split(",").map(s => s.trim()).filter(Boolean) : [],
-          publishedAfter: publishedAfterStr,
+          exclude_domains: avoid
+            ? avoid.split(",").map(s => s.trim()).filter(Boolean)
+            : [],
+          publishedAfter: publishedAfterStr // FIX 3: SMARTER TIME WINDOW
         }),
       }), TIMEOUT_MS);
-      if (!res.ok) return [];
+      
+      console.log(`[${new Date().toISOString()}] [CRON] [Tavily Debug] Response status: ${res.status} (${res.statusText})`);
+      
+      if (!res.ok) {
+        console.log(`[${new Date().toISOString()}] [CRON] Tavily bad response: fallback to RSS + Reddit`);
+        return [];
+      }
       const data = await res.json();
-      return (data.results || []).map(r => ({ source: "tavily", title: r.title || "", url: r.url || "", snippet: (r.content || r.snippet || "").slice(0, 400) }));
-    } catch (err) { return []; }
+      console.log(`[${new Date().toISOString()}] [CRON] [Tavily Debug] Received ${data.results?.length || 0} results from Tavily.`);
+      return (data.results || []).map(r => ({
+        source: "tavily",
+        title: r.title || "",
+        url: r.url || "",
+        snippet: (r.content || r.snippet || "").slice(0, 400),
+      }));
+    } catch (err) {
+      console.log(`[${new Date().toISOString()}] [CRON] Tavily failed/timeout: fallback to RSS + Reddit. Error:`, err.message);
+      return [];
+    }
   }
 
+  // --- Reddit ---
   async function reddit() {
-    const subredditMap = { "money": "Entrepreneur", "online": "Entrepreneur", "youtube": "NewTubers", "ai": "artificial", "startup": "startups", "finance": "finance", "tech": "technology", "crypto": "CryptoCurrency", "marketing": "marketing", "business": "business" };
+    const subredditMap = {
+      "ai": "artificial", "ml": "MachineLearning", "startup": "startups",
+      "finance": "finance", "tech": "technology", "politics": "worldnews",
+      "crypto": "CryptoCurrency", "marketing": "marketing", "design": "design",
+      "climate": "climate", "engineering": "programming",
+    };
     const topicsLower = (topics || "").toLowerCase();
-    let subreddit = "Entrepreneur";
-    for (const [key, sub] of Object.entries(subredditMap)) { if (topicsLower.includes(key)) { subreddit = sub; break; } }
+    let subreddit = "technology";
+    for (const [key, sub] of Object.entries(subredditMap)) {
+      if (topicsLower.includes(key)) { subreddit = sub; break; }
+    }
     try {
-      const res = await withTimeout(fetch(`https://www.reddit.com/r/${subreddit}/hot.json?limit=10`, { headers: { "User-Agent": "Signal-NewsDigest/1.0" } }), TIMEOUT_MS);
+      const res = await withTimeout(
+        fetch(`https://www.reddit.com/r/${subreddit}/hot.json?limit=10`, {
+          headers: { "User-Agent": "Signal-NewsDigest/1.0" },
+        }), TIMEOUT_MS
+      );
       if (!res.ok) return [];
       const data = await res.json();
-      return (data?.data?.children || []).filter(p => !p.data?.stickied && !p.data?.over_18).slice(0, 5).map(p => ({ source: "reddit", title: p.data?.title || "", url: `https://reddit.com${p.data?.permalink || ""}`, snippet: `${p.data?.ups || 0} upvotes · r/${p.data?.subreddit}` }));
-    } catch (err) { return []; }
+      return (data?.data?.children || [])
+        .filter(p => !p.data?.stickied && !p.data?.over_18)
+        .slice(0, 5)
+        .map(p => ({
+          source: "reddit",
+          title: p.data?.title || "",
+          url: `https://reddit.com${p.data?.permalink || ""}`,
+          snippet: `${p.data?.ups || 0} upvotes · r/${p.data?.subreddit} · ${p.data?.selftext || ""}`,
+        }));
+    } catch (err) {
+      console.log(`[${new Date().toISOString()}] [CRON] Reddit failed:`, err.message);
+      return [];
+    }
   }
 
+  // --- RSS ---
   async function rss() {
     const topicsLower = (topics || "").toLowerCase();
     const feedMap = [
-      { keys: ["money", "online", "business", "entrepreneur"], url: "https://feeds.feedburner.com/entrepreneur/latest" },
-      { keys: ["youtube", "creator"], url: "https://techcrunch.com/feed/" },
-      { keys: ["ai", "ml"], url: "https://techcrunch.com/category/artificial-intelligence/feed/" },
+      { keys: ["ai", "ml", "machine learning"], url: "https://techcrunch.com/category/artificial-intelligence/feed/" },
       { keys: ["startup"], url: "https://techcrunch.com/category/startups/feed/" },
-      { keys: ["finance", "market"], url: "https://feeds.bbci.co.uk/news/business/rss.xml" },
-      { keys: ["crypto"], url: "https://cointelegraph.com/rss" },
-      { keys: ["tech", "engineering"], url: "https://feeds.feedburner.com/TechCrunch" },
+      { keys: ["finance", "market", "economy"], url: "https://feeds.bbci.co.uk/news/business/rss.xml" },
+      { keys: ["tech", "engineering", "software"], url: "https://feeds.feedburner.com/TechCrunch" },
+      { keys: ["politics", "world", "geopolitics"], url: "https://feeds.bbci.co.uk/news/world/rss.xml" },
     ];
-    let feedUrl = "https://techcrunch.com/feed/";
-    for (const { keys, url } of feedMap) { if (keys.some(k => topicsLower.includes(k))) { feedUrl = url; break; } }
+    let feedUrl = "https://feeds.bbci.co.uk/news/rss.xml";
+    for (const { keys, url } of feedMap) {
+      if (keys.some((k) => topicsLower.includes(k))) { feedUrl = url; break; }
+    }
     try {
-      const res = await withTimeout(fetch(feedUrl, { headers: { "User-Agent": "Signal-NewsDigest/1.0" } }), TIMEOUT_MS);
+      const res = await withTimeout(
+        fetch(feedUrl, { headers: { "User-Agent": "Signal-NewsDigest/1.0" } }),
+        TIMEOUT_MS
+      );
       if (!res.ok) return [];
       const xml = await res.text();
       const items = [];
@@ -151,151 +235,324 @@ async function fetchNews(db, user, topics, profession, avoid, lastDigest) {
       while ((match = itemRegex.exec(xml)) !== null && items.length < 8) {
         const block = match[1];
         const title = (/<title><!\[CDATA\[(.*?)\]\]><\/title>/.exec(block) || /<title>(.*?)<\/title>/.exec(block) || [])[1] || "";
-        const link  = (/<link>(.*?)<\/link>/.exec(block)  || [])[1] || "";
-        const desc  = (/<description><!\[CDATA\[(.*?)\]\]><\/description>/.exec(block) || /<description>(.*?)<\/description>/.exec(block) || [])[1] || "";
-        if (title && link) items.push({ source: "rss", title: title.replace(/&amp;/g, "&").trim(), url: link.trim(), snippet: desc.replace(/<[^>]+>/g, "").slice(0, 300).trim() });
+        const link = (/<link>(.*?)<\/link>/.exec(block) || [])[1] || "";
+        const desc = (/<description><!\[CDATA\[(.*?)\]\]><\/description>/.exec(block) || /<description>(.*?)<\/description>/.exec(block) || [])[1] || "";
+        if (title && link) {
+          items.push({
+            source: "rss",
+            title: title.replace(/&amp;/g, "&").trim(),
+            url: link.trim(),
+            snippet: desc.replace(/<[^>]+>/g, "").slice(0, 300).trim(),
+          });
+        }
       }
       return items;
-    } catch (err) { return []; }
+    } catch (err) {
+      console.log(`[${new Date().toISOString()}] [CRON] RSS failed:`, err.message);
+      return [];
+    }
   }
 
+  // --- YouTube ---
   async function youtube() {
     if (!youtubeKey) return [];
-    const query = `${(topics || "technology").split(",")[0].trim()} ${profession ? profession.split(" ")[0] : ""} ${new Date().getFullYear()}`.trim();
+    const primaryTopic = (topics || "technology").split(",")[0].trim();
+    const query = `${primaryTopic} ${profession ? profession.split(" ")[0] : ""} 2025`.trim();
     try {
-      const params = new URLSearchParams({ part: "snippet", q: query, type: "video", order: "relevance", maxResults: "5", videoDuration: "medium", relevanceLanguage: "en", publishedAfter: publishedAfterStr, key: youtubeKey });
+      const params = new URLSearchParams({
+        part: "snippet", q: query, type: "video",
+        order: "relevance", maxResults: "5",
+        videoDuration: "medium", relevanceLanguage: "en",
+        publishedAfter: publishedAfterStr, // FIX 3: SMARTER TIME WINDOW
+        key: youtubeKey,
+      });
       const res = await withTimeout(fetch(`${YOUTUBE_URL}?${params}`), TIMEOUT_MS);
       if (!res.ok) return [];
       const data = await res.json();
-      return (data.items || []).filter(i => i.snippet?.title?.length > 10).map(item => ({ source: "youtube", title: item.snippet.title, url: `https://youtube.com/watch?v=${item.id.videoId}`, snippet: `${item.snippet.channelTitle} · ${item.snippet.description || ""}` }));
-    } catch (err) { return []; }
+      return (data.items || [])
+        .filter(i => i.snippet?.title?.length > 10)
+        .map(item => ({
+          source: "youtube",
+          title: item.snippet.title,
+          url: `https://youtube.com/watch?v=${item.id.videoId}`,
+          snippet: `Video on YouTube: ${item.snippet.channelTitle} · ${item.snippet.description || ""}`,
+        }));
+    } catch (err) {
+      console.log(`[${new Date().toISOString()}] [CRON] YouTube failed:`, err.message);
+      return [];
+    }
   }
 
-  const [tavilyArticles, rssItems, redditPosts, youtubeVideos] = await Promise.all([tavily(), rss(), reddit(), youtube()]);
-  let pool = [...(tavilyArticles || []), ...(rssItems || []), ...(redditPosts || []), ...(youtubeVideos || [])];
+  // --- Google Trends ---
+  async function googleTrends() {
+    try {
+      const primaryTopic = (topics || "technology").split(",")[0].trim();
+      const encodedTopic = encodeURIComponent(primaryTopic);
+      const res = await withTimeout(
+        fetch(`https://trends.google.com/trends/api/dailytrends?hl=en-US&tz=-300&geo=US&ns=15`, {
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+        }), TIMEOUT_MS
+      );
+      if (!res.ok) return [];
+      const text = await res.text();
+      const json = JSON.parse(text.slice(5));
+      const trends = json?.default?.trendingSearchesDays?.[0]?.trendingSearches || [];
+      
+      const topicKeywordsLower = (topics || "").toLowerCase().split(/[\s,]+/).filter(k => k.length > 2);
+      
+      const results = [];
+      for (const trend of trends.slice(0, 20)) {
+        const title = trend.title?.query || "";
+        const titleLower = title.toLowerCase();
+        const articles = trend.articles || [];
+        const firstArticle = articles[0];
+        
+        // Only include if relevant to user topics
+        const isRelevant = topicKeywordsLower.some(kw => titleLower.includes(kw)) ||
+          (firstArticle && topicKeywordsLower.some(kw => 
+            (firstArticle.title || "").toLowerCase().includes(kw)
+          ));
+        
+        if (isRelevant && firstArticle) {
+          results.push({
+            source: "google_trends",
+            title: `🔎 Trending: ${title} — ${firstArticle.title || ""}`,
+            url: firstArticle.url || `https://trends.google.com/trends/explore?q=${encodedTopic}&geo=US`,
+            snippet: `Currently trending in the US with ${trend.formattedTraffic || "high"} searches. ${firstArticle.snippet || ""}`,
+          });
+        }
+      }
+      console.log(`[CRON] Google Trends returned ${results.length} relevant results`);
+      return results;
+    } catch (err) {
+      console.log(`[CRON] Google Trends failed:`, err.message);
+      return [];
+    }
+  }
 
-  pool = pool.filter(art => {
+  const [tavilyArticles, rssItems, redditPosts, youtubeVideos, trendingTopics] = await Promise.all([
+    tavily(), rss(), reddit(), youtube(), googleTrends(),
+  ]);
+
+  // Combine into one single pool
+  let candidatePool = [
+    ...(tavilyArticles || []),
+    ...(rssItems || []),
+    ...(redditPosts || []),
+    ...(youtubeVideos || []),
+    ...(trendingTopics || []),
+  ];
+
+  console.log(`[CRON] Total candidate pool size before filtering: ${candidatePool.length} articles/posts`);
+
+  // FIX 2: PREVENT DUPLICATE STORIES — Filter candidatePool against sentUrls
+  candidatePool = candidatePool.filter(art => {
     if (!art.url) return true;
     const urlLower = art.url.trim().toLowerCase();
-    for (const sentUrl of sentUrls) { if (urlLower.includes(sentUrl) || sentUrl.includes(urlLower)) return false; }
+    for (const sentUrl of sentUrls) {
+      if (urlLower.includes(sentUrl) || sentUrl.includes(urlLower)) {
+        console.log(`[CRON] Filtering out duplicate story URL: ${art.url}`);
+        return false;
+      }
+    }
     return true;
   });
 
-  const topicKeywords = (topics || "").toLowerCase().split(/[\s,]+/).map(k => k.trim()).filter(k => k.length > 2);
-  const profKeywords  = (profession || "").toLowerCase().split(/[\s,]+/).map(k => k.trim()).filter(k => k.length > 2);
+  console.log(`[CRON] Candidate pool size after duplicate filtering: ${candidatePool.length}`);
 
-  const ranked = pool.map(art => {
+  // FIX 1: REMOVE FORCED SOURCE DIVERSITY — Rank candidates by relevance to topics and profession
+  const topicKeywords = (topics || "")
+    .toLowerCase()
+    .split(/[\s,]+/)
+    .map(k => k.trim())
+    .filter(k => k.length > 2);
+  
+  const profKeywords = (profession || "")
+    .toLowerCase()
+    .split(/[\s,]+/)
+    .map(k => k.trim())
+    .filter(k => k.length > 2);
+
+  const rankedCandidates = candidatePool.map(art => {
     let score = 0;
-    const tl = (art.title || "").toLowerCase(), sl = (art.snippet || "").toLowerCase();
-    topicKeywords.forEach(kw => { if (tl.includes(kw)) score += 15; if (sl.includes(kw)) score += 5; });
-    profKeywords.forEach(kw  => { if (tl.includes(kw)) score += 10; if (sl.includes(kw)) score += 3; });
-    if (art.source === "tavily")  score += 3;
-    if (art.source === "youtube") score += 2;
-    if (art.source === "reddit")  score += 1;
+    const titleLower = (art.title || "").toLowerCase();
+    const snippetLower = (art.snippet || "").toLowerCase();
+
+    // Match keywords
+    topicKeywords.forEach(kw => {
+      if (titleLower.includes(kw)) score += 15;
+      if (snippetLower.includes(kw)) score += 5;
+    });
+
+    profKeywords.forEach(kw => {
+      if (titleLower.includes(kw)) score += 10;
+      if (snippetLower.includes(kw)) score += 3;
+    });
+
+    // Give a slight boost to high-conviction sources like Tavily and YouTube
+    if (art.source === "tavily")        score += 2;
+    if (art.source === "youtube")       score += 1;
+    if (art.source === "google_trends") score += 3;
+
     return { ...art, score };
   });
-  ranked.sort((a, b) => b.score - a.score);
-  return { articles: ranked.slice(0, 6) };
+
+  // Sort descending by score
+  rankedCandidates.sort((a, b) => b.score - a.score);
+
+  // Take top 5-6 articles (take top 6)
+  const finalArticles = rankedCandidates.slice(0, 6);
+
+  console.log(`[CRON] Selected top 6 articles based on relevance:`, finalArticles.map(a => `[Score: ${a.score}, Source: ${a.source}] ${a.title}`));
+
+  return {
+    articles: finalArticles,
+    reddit: [],
+    video: null,
+  };
 }
 
-// ── DIGEST GENERATION ─────────────────────────────────────────────────────────
+// ── PERSONALIZED DIGEST GENERATION (Gemini with Groq Fallback) ────────────────
 async function generateDigest(user, news) {
-  const apiGrokKey   = (process.env.GROK_API_KEY   || "").trim();
+  const apiGrokKey = (process.env.GROK_API_KEY || "").trim();
   const apiGeminiKey = (process.env.GEMINI_API_KEY || "").trim();
-  if (!apiGrokKey && !apiGeminiKey) throw new Error("Neither GEMINI_API_KEY nor GROK_API_KEY is configured.");
+  if (!apiGrokKey && !apiGeminiKey) {
+    throw new Error("Neither GEMINI_API_KEY nor GROK_API_KEY is configured.");
+  }
 
   const profile = user.profile || {};
-  const memory  = ensureMemory(user, profile);
-  const today   = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+  const memory = ensureMemory(user, profile);
+  const today = new Date().toLocaleDateString("en-US", {
+    weekday: "long", month: "long", day: "numeric", year: "numeric",
+  });
 
   const articleText = news.articles.length
-    ? news.articles.map((a, i) => `[${i + 1}] ${a.title}\nSource: ${a.source} | ${a.url}\n${a.snippet}`).join("\n\n")
+    ? news.articles.map((a, i) =>
+        `[${i + 1}] ${a.title}\nSource: ${a.source} | ${a.url}\n${a.snippet}`
+      ).join("\n\n")
     : "No articles available.";
 
-  const memoryText  = formatMemoryForPrompt(memory);
-  const profileText = [
-    user.name          && `Name: ${user.name}`,
-    profile.profession && `Role: ${profile.profession}`,
-    profile.goals      && `Goals: ${profile.goals}`,
-    profile.topics     && `Topics: ${profile.topics}`,
-    profile.avoid      && `Avoid: ${profile.avoid}`,
-    profile.summary    && `Summary: ${profile.summary.slice(0, 400)}`,
-    profile.tone       && `Tone: ${profile.tone}`,
+  const redditText = news.reddit.length
+    ? news.reddit.map((r) => `[R] ${r.title}\n${r.snippet}\n${r.url}`).join("\n\n")
+    : "";
+
+  const videoText = news.video
+    ? `VIDEO: "${news.video.title}" by ${news.video.channel}\n${news.video.url}`
+    : "";
+
+  const newsContext = [
+    "ARTICLES:",
+    articleText,
+    redditText && "\nREDDIT:\n" + redditText,
+    videoText && "\n" + videoText,
   ].filter(Boolean).join("\n");
 
-  const systemInstruction = `You are Signal — a ruthlessly precise personal intelligence system.
+  const memoryText = formatMemoryForPrompt(memory);
+  const profileText = [
+    user.name && `Name: ${user.name}`,
+    profile.profession && `Role: ${profile.profession}`,
+    profile.goals && `Goals: ${profile.goals}`,
+    profile.topics && `Topics: ${profile.topics}`,
+    profile.avoid && `Avoid: ${profile.avoid}`,
+    profile.summary && `Summary: ${profile.summary.slice(0, 400)}`,
+    profile.tone && `Tone: ${profile.tone}`,
+  ].filter(Boolean).join("\n");
 
-MANDATORY RULES — violating any is a critical failure:
-1. EXACTLY 2 sentences per story. Not 1. Not 3. Count them. Stop at 2.
-2. Sentence 1: what happened — sharp, specific, no fluff.
-3. Sentence 2: what changes next, who wins, or what opportunity opens.
-4. NEVER use: "WHAT:", "WHY YOU:", "ACTION:", "WHY IT MATTERS:", "IMPLICATION:"
-5. NEVER use: "may have implications", "could impact", "important to understand", "as a professional in", "consider exploring", "monitor the situation", "significant development", "it is critical to"
-6. 📊 THIS WEEK = pure trend observations only. No advice. No actions. No recommendations.
-7. Never say "as a YouTuber" or "as a [profession]" — just deliver the insight.
-8. Write like a sharp analyst, not a corporate AI.`;
+  const prompt = `Generate a personalized intelligence brief for ONE specific user. Today is ${today}.
 
-  const prompt = `Generate a personalized intelligence brief. Today is ${today}.
-
-USER PROFILE:
+USER IS:
 ${memoryText || profileText}
 
-ARTICLES:
-${articleText}
+${newsContext}
 
-OUTPUT FORMAT — follow exactly:
+OUTPUT FORMAT (follow exactly, preserving character dividers and icons):
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 YOUR SIGNAL · ${today}
 
 🔥 TOP STORIES
 
-① [Headline]
-[EXACTLY 2 sentences. S1: what happened. S2: what changes next or who benefits.]
-→ [URL]
+① [Story headline or synthesized high-conviction trend]
+[Synthesized Intelligence Paragraph: Strictly 2 sentences maximum. Sentence 1 must state what happened, sharp and specific. Sentence 2 must state what changes next, who benefits, or what opportunity exists. Absolutely do not use labels like "WHAT:", "WHY YOU:", "ACTION:", "WHY IT MATTERS:", or "IMPLICATION:". Do not use generic filler or clinical phrases like "As a professional in...", "Consider exploring...", "Monitor the situation...", "may have implications", "could impact", "important to understand", "significant development", "it is critical to". Write like an elite strategic advisor.]
+→ [source URL]
 
-② [Headline]
-[EXACTLY 2 sentences.]
-→ [URL]
+② [Next Story headline]
+[Synthesized Intelligence Paragraph: Exactly 2 sentences maximum. Sentence 1: what happened. Sentence 2: what changes next/opportunity. No labels or procedural tags.]
+→ [source URL]
 
-③ [Headline]
-[EXACTLY 2 sentences.]
-→ [URL]
+③ [Story headline — only if strongly relevant]
+[Synthesized Intelligence Paragraph: Exactly 2 sentences maximum. Sentence 1: what happened. Sentence 2: what changes next/opportunity. No labels or procedural tags.]
+→ [source URL]
 
-④ [Headline]
-[EXACTLY 2 sentences.]
-→ [URL]
+④ [Story headline — only if strongly relevant]
+[Synthesized Intelligence Paragraph: Exactly 2 sentences maximum. Sentence 1: what happened. Sentence 2: what changes next/opportunity. No labels or procedural tags.]
+→ [source URL]
 
-⑤ [Headline]
-[EXACTLY 2 sentences.]
-→ [URL]
+⑤ [Story headline — only if strongly relevant]
+[Synthesized Intelligence Paragraph: Exactly 2 sentences maximum. Sentence 1: what happened. Sentence 2: what changes next/opportunity. No labels or procedural tags.]
+→ [source URL]
 
 📊 THIS WEEK
-• [Sharp trend observation. 1-2 sentences. No advice. No actions.]
-• [Sharp trend observation. 1-2 sentences. No advice. No actions.]
-• [Sharp trend observation. 1-2 sentences. No advice. No actions.]
+• [Trend Observation 1: A sharp, specific observation of a current shift, trend, or development. Absolutely NO advice, NO action steps, NO recommendations. Plain observation only, exactly 1-2 sentences.]
+• [Trend Observation 2: Another sharp trend observation, absolutely no advice or actions, exactly 1-2 sentences.]
+• [Trend Observation 3 — optional: A third trend observation, absolutely no advice or actions, exactly 1-2 sentences.]
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+STRICT WRITING DIRECTIVES:
+- NO LABELS: Never write "WHAT:", "WHY YOU:", "ACTION:", "WHY IT MATTERS:", or "IMPLICATION:". Deliver pure synthesized intelligence.
+- NO CLINICAL AI HYPNOTICS: Never use phrases like "may have implications", "could impact", "important to understand", "as a professional in...", "Consider exploring...", "Monitor the situation...", "significant development", "it is critical to".
+- EACH STORY MUST BE MAXIMUM 2 SENTENCES: Sentence 1 must state what happened (sharp and specific). Sentence 2 must state what changes next, who benefits, or what opportunity exists.
+- INSIGHT FIRST: Do not write "AI is transforming industries." Instead write: "Small agencies are starting to substitute whole creative departments with local open-source pipelines."
+- BE PRECISE AND DIRECT: Provide concrete figures, realistic scenarios, or sharp opportunism. Sound like a smart, elite colleague. Connect dots between stories where possible.`;
+
+  // Use Gemini if available
   if (apiGeminiKey) {
     const { GoogleGenAI } = require("@google/genai");
-    const ai = new GoogleGenAI({ apiKey: apiGeminiKey });
+    const ai = new GoogleGenAI({
+      apiKey: apiGeminiKey,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        }
+      }
+    });
+
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      config: { systemInstruction, temperature: 0.25 },
+      model: "gemini-3.5-flash",
+      contents: prompt,
+      config: {
+        systemInstruction: "You are Signal — a personal intelligence system. Filter noise into insights for one person. Never hallucinate. You will be penalized for writing more than 2 sentences per story. Count your sentences. Stop at 2. Explain WHY. Give actionable implications.",
+        temperature: 0.3,
+      }
     });
     return response.text || "";
   } else {
-    const res = await withTimeout(fetch(GROK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiGrokKey}` },
-      body: JSON.stringify({
-        model: MODEL, max_tokens: 1400,
-        messages: [{ role: "system", content: systemInstruction }, { role: "user", content: prompt }],
+    // Fallback to Groq
+    const res = await withTimeout(
+      fetch(GROK_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiGrokKey}`,
+        },
+        body: JSON.stringify({
+          model: MODEL,
+          max_tokens: 1400,
+          messages: [
+            { role: "system", content: "You are Signal — a personal intelligence system. Filter noise into insights for one person. Never hallucinate. You will be penalized for writing more than 2 sentences per story. Count your sentences. Stop at 2. Explain WHY. Give actionable implications." },
+            { role: "user", content: prompt },
+          ],
+        }),
       }),
-    }), TIMEOUT_MS);
-    if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error?.message || "Groq error"); }
+      TIMEOUT_MS
+    );
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message || "Groq API error");
+    }
+
     const data = await res.json();
     return data.choices?.[0]?.message?.content || "";
   }
@@ -307,23 +564,35 @@ async function sendDigestEmail(user, digestContent) {
   const fromEmail = (process.env.FROM_EMAIL || "Signal <onboarding@resend.dev>").trim();
   if (!apiKey) throw new Error("RESEND_API_KEY not set");
 
-  const profile = user.profile || {};
-  let firstName = profile.firstName || profile.name || (user.name || "").split(" ")[0] || "there";
-  if (!firstName || firstName.length < 2 || ["undefined", "sh", "sh."].includes(firstName.toLowerCase())) firstName = "there";
+  let firstName = (user.name || "").split(" ")[0] || "there";
+  if (firstName.toLowerCase() === "sh" || firstName.toLowerCase() === "sh.") {
+    firstName = "there";
+  }
+  const date = new Date().toLocaleDateString("en-US", {
+    weekday: "long", month: "long", day: "numeric",
+  });
 
-  const date = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
-
+  // Convert plain text digest to HTML
   const bodyHtml = digestContent
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/━+/g, '<hr style="border:none;border-top:1px solid #E8E6E0;margin:18px 0;"/>')
-    .replace(/^(🔥|📊|📺|💬)[^\n]+$/gm, m => `<p style="font-size:12px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#16A34A;margin:20px 0 8px;">${m}</p>`)
-    .replace(/^(①|②|③|④|⑤|⑥)/gm, m => `<span style="color:#1B4FD8;font-weight:700;">${m}</span>`)
-    .replace(/^→ .+$/gm, m => `<span style="font-size:12px;color:#1B4FD8;">${m}</span>`)
-    .replace(/^• .+$/gm, m => `<div style="display:flex;gap:8px;margin-bottom:6px;"><span style="color:#16A34A;">•</span><span>${m.slice(2)}</span></div>`)
+    .replace(/^(🔥|💡|📊|📺|💬)[^\n]+$/gm, m =>
+      `<p style="font-size:12px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#16A34A;margin:20px 0 8px;">${m}</p>`)
+    .replace(/^(①|②|③|④|⑤|⑥)/gm, m =>
+      `<span style="color:#1B4FD8;font-weight:700;">${m}</span>`)
+    .replace(/^→ .+$/gm, m =>
+      `<span style="font-size:12px;color:#1B4FD8;">${m}</span>`)
+    .replace(/^• .+$/gm, m =>
+      `<div style="display:flex;gap:8px;margin-bottom:6px;"><span style="color:#16A34A;">•</span><span>${m.slice(2)}</span></div>`)
     .replace(/\n/g, "<br/>");
 
   const html = `<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Your Signal — ${date}</title></head>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Your digest — ${date}</title>
+</head>
 <body style="margin:0;padding:0;background:#FAFAF8;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#1A1A18;">
 <div style="padding:24px 16px;">
   <div style="max-width:580px;margin:0 auto;background:#fff;border:1px solid #E8E6E0;border-radius:12px;overflow:hidden;">
@@ -336,133 +605,255 @@ async function sendDigestEmail(user, digestContent) {
       ${bodyHtml}
     </div>
     <div style="padding:18px 28px;text-align:center;font-size:12px;color:#9E9E96;border-top:1px solid #E8E6E0;">
-      <p>You're receiving this because you subscribed to Sharflow.</p>
+      <p>You're receiving this because you subscribed to Sharflow. To unsubscribe visit sharflow.com/unsubscribe</p>
       <p style="margin-top:6px;"><a href="https://sharflow.com/unsubscribe" style="color:#9E9E96;text-decoration:none;">Unsubscribe</a> · <a href="#" style="color:#9E9E96;text-decoration:none;">Update preferences</a></p>
     </div>
   </div>
-</div></body></html>`;
+</div>
+</body>
+</html>`;
 
-  const res = await withTimeout(fetch(RESEND_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ from: fromEmail, to: [user.email], subject: `Your Signal — ${date}`, html, headers: { "List-Unsubscribe": "<https://sharflow.com/unsubscribe>" } }),
-  }), TIMEOUT_MS);
+  const res = await withTimeout(
+    fetch(RESEND_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        from: fromEmail,
+        to: [user.email],
+        subject: `Your digest — ${date}`,
+        html,
+        headers: {
+          "List-Unsubscribe": "<https://sharflow.com/unsubscribe>"
+        }
+      }),
+    }),
+    TIMEOUT_MS
+  );
+
   const data = await res.json();
   if (!res.ok) throw new Error(data?.message || "Resend error");
   return data.id;
 }
 
-// ── SAVE DIGEST ───────────────────────────────────────────────────────────────
+// ── SAVE DIGEST TO MONGODB ─────────────────────────────────────────────────────
 async function saveDigest(db, userId, email, content, localDateStr) {
   try {
-    await db.collection("digests").insertOne({ userId, email, content, sentAt: new Date(), date: localDateStr || new Date().toISOString().split("T")[0] });
-  } catch (e) { console.warn("Digest save failed:", e.message); }
+    await db.collection("digests").insertOne({
+      userId,
+      email,
+      content,
+      sentAt: new Date(),
+      date: localDateStr || new Date().toISOString().split("T")[0],
+    });
+  } catch (e) {
+    console.warn("Digest save failed:", e.message);
+  }
 }
 
+// ── RECORD DELIVERY ATTEMPT LOG ──────────────────────────────────────────────────
 async function logDelivery(db, user, status, error = null, userLocalDateStr = "", userTimeStr = "") {
   try {
-    await db.collection("delivery_logs").insertOne({ userId: user._id, email: user.email, status, error, attemptedAt: new Date(), userLocalTime: userTimeStr, userLocalDate: userLocalDateStr, timezone: user.profile?.timezone || "UTC", digestTime: user.profile?.digestTime || "08:00" });
-  } catch (e) { console.warn("Log insert failed:", e.message); }
+    await db.collection("delivery_logs").insertOne({
+      userId: user._id,
+      email: user.email,
+      status, // 'success', 'failed', 'skipped'
+      error,
+      attemptedAt: new Date(),
+      userLocalTime: userTimeStr,
+      userLocalDate: userLocalDateStr,
+      timezone: user.profile?.timezone || "UTC",
+      digestTime: user.profile?.digestTime || "08:00"
+    });
+  } catch (e) {
+    console.warn("Delivery log insert failed:", e.message);
+  }
 }
 
 // ── MAIN HANDLER ──────────────────────────────────────────────────────────────
 async function handler(req, res) {
+  // Vercel cron sends Authorization: Bearer <CRON_SECRET>
   const cronSecret = (process.env.CRON_SECRET || "").trim();
   if (cronSecret) {
     const authHeader = req.headers?.authorization || "";
-    if (authHeader !== `Bearer ${cronSecret}`) return res.status(401).json({ error: "Unauthorized" });
+    if (authHeader !== `Bearer ${cronSecret}`) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
   }
-  if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
+
+  if (req.method !== "GET") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
 
   const startTime = Date.now();
-  const results   = { sent: 0, failed: 0, skipped: 0, errors: [] };
-  const now       = new Date();
+  const results = { sent: 0, failed: 0, skipped: 0, errors: [] };
+  const now = new Date();
 
   try {
     const db    = await getDb();
-    const users = await db.collection("users").find({ email: { $exists: true, $ne: "" }, profile: { $exists: true, $ne: null } }).toArray();
-    console.log(`[CRON] Starting digest run for ${users.length} users`);
+    const users = await db.collection("users").find({
+      email:   { $exists: true, $ne: "" },
+      profile: { $exists: true, $ne: null },
+    }).toArray();
+
+    console.log(`[CRON] Starting hourly timezone matching run for ${users.length} registered users`);
 
     for (const user of users) {
-      let userTimeStr = "", userLocalDateStr = "", userTz = user.profile?.timezone || "UTC";
-      try {
-        if (!user.email || !user.profile?.summary) { results.skipped++; continue; }
+      let userTimeStr = "";
+      let userLocalDateStr = "";
+      let userHour = 8;
+      let userTz = user.profile?.timezone || "UTC";
 
-        const profile              = user.profile;
-        const digestTimePreference = profile.digestTime || "08:00";
+      try {
+        if (!user.email || !user.profile?.summary) {
+          console.log(`[${new Date().toISOString()}] [CRON] Skipping user ${user.email || "unknown"} — email or starting profile summary is missing.`);
+          results.skipped++;
+          continue;
+        }
+
+        const profile = user.profile;
+        const digestTimePreference = profile.digestTime || "08:00"; 
 
         try {
-          userTimeStr      = now.toLocaleTimeString("en-US", { timeZone: userTz, hour12: false, hour: "2-digit", minute: "2-digit" });
-          userLocalDateStr = now.toLocaleDateString("en-US",  { timeZone: userTz, year: "numeric", month: "2-digit", day: "2-digit" });
+          userTimeStr = now.toLocaleTimeString("en-US", {
+            timeZone: userTz,
+            hour12: false,
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+          userLocalDateStr = now.toLocaleDateString("en-US", {
+            timeZone: userTz,
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+          });
+          const localHourStr = now.toLocaleTimeString("en-US", {
+            timeZone: userTz,
+            hour12: false,
+            hour: "2-digit",
+          });
+          userHour = parseInt(localHourStr, 10);
         } catch (tzErr) {
+          console.warn(`[${new Date().toISOString()}] Invalid timezone [${userTz}] for user ${user.email}, falling back to UTC`, tzErr.message);
           userTz = "UTC";
-          userTimeStr      = now.toLocaleTimeString("en-US", { timeZone: "UTC", hour12: false, hour: "2-digit", minute: "2-digit" });
-          userLocalDateStr = now.toLocaleDateString("en-US",  { timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit" });
+          userTimeStr = now.toLocaleTimeString("en-US", {
+            timeZone: "UTC",
+            hour12: false,
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+          userLocalDateStr = now.toLocaleDateString("en-US", {
+            timeZone: "UTC",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+          });
+          userHour = now.getUTCHours();
         }
 
-        const targetUTCHour  = getUTCHourForLocalTime(digestTimePreference, userTz);
+        // Get user's digestTime and timezone, convert to UTC hour
+        const targetUTCHour = getUTCHourForLocalTime(digestTimePreference, userTz);
         const currentUTCHour = now.getUTCHours();
-        if (currentUTCHour !== targetUTCHour) { results.skipped++; continue; }
 
-        // Atomic lock — prevent duplicate sends
-        const lockResult = await db.collection("digests").updateOne(
-          { email: user.email, date: userLocalDateStr },
-          { $setOnInsert: { email: user.email, date: userLocalDateStr, locked: true, lockedAt: new Date() } },
-          { upsert: true }
-        );
-        if (lockResult.upsertedCount === 0) {
-          console.log(`[CRON] Skipping ${user.email} — already sent for ${userLocalDateStr}`);
+        // 1. Check if current UTC hour matches target UTC hour
+        if (currentUTCHour !== targetUTCHour) {
+          console.log(`[${new Date().toISOString()}] [CRON] Skipping ${user.email} — current UTC hour ${currentUTCHour} does not match target UTC hour ${targetUTCHour} (preferred local ${digestTimePreference} in ${userTz}).`);
           results.skipped++;
           continue;
         }
 
-        const lastDigest = await db.collection("digests").findOne(
-          { email: user.email, locked: { $ne: true } },
-          { sort: { sentAt: -1 } }
-        );
+        // 2. Prevent duplicate sends within the same user-local day
+        if (user.lastDigestSentDate === userLocalDateStr) {
+          console.log(`[${new Date().toISOString()}] [CRON] Skipping ${user.email} — already received their digest for ${userLocalDateStr} today.`);
+          results.skipped++;
+          continue;
+        }
 
-        const topics = profile.topics     || "technology, AI";
-        const prof   = profile.profession || "";
-        const avoid  = profile.avoid      || "";
+        // 3. Double check the digests collection to ensure no race conditions
+        const existingDigest = await db.collection("digests").findOne({
+          email: user.email,
+          date: userLocalDateStr
+        });
+        if (existingDigest) {
+          console.log(`[${new Date().toISOString()}] [CRON] Skipping ${user.email} — duplicate check matched in db digests collection for ${userLocalDateStr}.`);
+          await db.collection("users").updateOne(
+            { _id: user._id },
+            { $set: { lastDigestSentDate: userLocalDateStr } }
+          );
+          results.skipped++;
+          continue;
+        }
 
-        const news = await fetchNews(db, user, topics, prof, avoid, lastDigest);
-        console.log(`[CRON] ${user.email} — ${news.articles.length} articles (cache or live)`);
+        // 4. Matches scheduled parameters - proceed with fetch and dispatch
+        const topics  = profile.topics     || "technology, AI";
+        const prof    = profile.profession || "";
+        const avoid   = profile.avoid      || "";
 
+        // Read the last digest record for this user from the "digests" collection
+        const userDigests = await db.collection("digests").find({ email: user.email }).toArray();
+        const sortedDigests = userDigests.sort((a, b) => new Date(b.sentAt) - new Date(a.sentAt));
+        const lastDigest = sortedDigests[0] || null;
+
+        // Fetch news matching preferences
+        const news = await fetchNews(topics, prof, avoid, lastDigest);
+        console.log(`[${new Date().toISOString()}] [CRON] ${user.email} — fetched ${news.articles.length} news articles`);
+
+        // Generate personalized digest via AI
         const digestContent = await generateDigest(user, news);
-        if (!digestContent) {
-          await db.collection("digests").deleteOne({ email: user.email, date: userLocalDateStr, locked: true });
-          results.skipped++;
-          await logDelivery(db, user, "skipped", "Empty digest", userLocalDateStr, userTimeStr);
-          continue;
+        if (!digestContent) { 
+          console.log(`[${new Date().toISOString()}] [CRON] Skipping ${user.email} — generated digest content is empty.`);
+          results.skipped++; 
+          await logDelivery(db, user, "skipped", "Empty digest content generated", userLocalDateStr, userTimeStr);
+          continue; 
         }
 
+        // Send beautiful HTML email via Resend
         const emailId = await sendDigestEmail(user, digestContent);
-        console.log(`[CRON] ${user.email} — sent: ${emailId}`);
+        console.log(`[${new Date().toISOString()}] [CRON] ${user.email} — email sent successfully: ${emailId}`);
 
-        await db.collection("digests").updateOne(
-          { email: user.email, date: userLocalDateStr },
-          { $set: { userId: user._id, content: digestContent, sentAt: new Date(), locked: false } }
+        // Save complete historical record inside the digests collection
+        await saveDigest(db, user._id, user.email, digestContent, userLocalDateStr);
+
+        // Stamp send state directly to the user record
+        await db.collection("users").updateOne(
+          { _id: user._id },
+          { $set: { lastDigestSentDate: userLocalDateStr, lastDigestSentAt: new Date() } }
         );
-        await db.collection("users").updateOne({ _id: user._id }, { $set: { lastDigestSentDate: userLocalDateStr, lastDigestSentAt: new Date() } });
+
+        // Log successful delivery attempt
         await logDelivery(db, user, "success", null, userLocalDateStr, userTimeStr);
+
         results.sent++;
+
+        // Rate limit padding between active dispatches
         await sleep(500);
 
       } catch (userErr) {
-        console.error(`[CRON] Failed for ${user.email}:`, userErr.message);
-        try { await db.collection("digests").deleteOne({ email: user.email, date: userLocalDateStr, locked: true }); } catch (_) {}
+        console.error(`[${new Date().toISOString()}] [CRON] Failed for ${user.email}:`, userErr.message);
         results.failed++;
         results.errors.push({ email: user.email, error: userErr.message });
-        try { await logDelivery(db, user, "failed", userErr.message, userLocalDateStr, userTimeStr); } catch (_) {}
+        try {
+          await logDelivery(db, user, "failed", userErr.message, userLocalDateStr, userTimeStr);
+        } catch (logErr) {
+          console.error(`[${new Date().toISOString()}] Status log write failed for ${user.email}:`, logErr.message);
+        }
       }
     }
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`[CRON] Done in ${duration}s —`, results);
-    return res.status(200).json({ ok: true, duration: `${duration}s`, users: users.length, ...results });
+
+    return res.status(200).json({
+      ok: true,
+      duration: `${duration}s`,
+      users: users.length,
+      ...results,
+    });
 
   } catch (err) {
-    console.error("[CRON] Fatal:", err.message);
+    console.error("[CRON] Fatal error:", err.message);
     return res.status(500).json({ error: err.message || "Cron failed" });
   }
 }
